@@ -77,12 +77,12 @@ def init_db():
             UNIQUE(run_id, character_id)
         )
     """)
-
-    # Seed bosses
+    
+    c.execute("DELETE FROM bosses")
     for name, difficulties in BOSSES:
         for diff in difficulties:
             c.execute(
-                "INSERT INTO bosses (name, difficulty) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO bosses (name, difficulty) VALUES (%s, %s)",
                 (name, diff)
             )
 
