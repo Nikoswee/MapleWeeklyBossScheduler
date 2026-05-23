@@ -4,8 +4,8 @@ Reads DATABASE_URL from environment (set automatically by Railway).
 """
 
 import os
-import psycopg2
-import psycopg2.extras
+import asyncpg
+import asyncio
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
