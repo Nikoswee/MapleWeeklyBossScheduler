@@ -10,12 +10,15 @@ import psycopg2.extras
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 BOSSES = [
-    ("Lotus",           ["Normal", "Hard"]),
-    ("Kalos",           ["Easy", "Normal", "Chaos"]),
-    ("Kaling",          ["Easy", "Normal", "Hard", "Chaos"]),
-    ("First Adversary", ["Easy", "Normal", "Hard", "Chaos"]),
-    ("Limbo",           ["Normal", "Extreme"]),
-    ("Baldrix",         ["Normal", "Hard", "Extreme"]),
+    ("Lotus",           ["Extreme"]),
+    ("Kalos",           ["Normal", "Chaos", "Extreme"]),
+    ("Kaling",          ["Normal", "Hard", "Extreme"]),
+    ("First Adversary", ["Normal", "Hard", "Extreme"]),
+    ("Black Mage",      ["Normal", "Hard", "Extreme"]),
+    ("Seren",           ["Normal", "Hard", "Extreme"]),
+    ("Malefic",         ["Normal", "Hard", "Extreme"]),
+    ("Limbo",           ["Normal", "Hard"]),
+    ("Baldrix",         ["Normal", "Hard"]),
 ]
 
 def get_conn():
