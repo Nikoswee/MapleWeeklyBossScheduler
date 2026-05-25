@@ -81,45 +81,51 @@ def get_run_dt(run):
     return run_dt
 
 def fmt_run(run, members=None):
+    """Single run — plain text, no Markdown."""
     icon     = diff_icon(run["difficulty"])
     sgt      = get_run_dt(run) + timedelta(hours=8)
     time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
     lines = [
-        f"⚔️ *Run \\#{run['id']}* — {icon} {esc(run['boss_name'])} {esc(run['difficulty'])}",
+        f"⚔️ #{run['id']} · {run['boss_name']} {run['difficulty']} {icon}",
         f"📅 {time_str}",
-        f"👑 Leader: @{esc(run['leader_username'])}",
-        f"📋 Status: *{run['status'].upper()}*",
+        f"👑 @{run['leader_username']}",
+        f"📋 {run['status'].upper()}",
     ]
     if members:
-        lines.append("\n👥 *Party:*")
-        for m in members:
-            status = {1: "✅", -1: "❌", 0: "⏳"}[m["accepted"]]
-            line   = f"  {status} *{esc(m['ign'])}*"
-            if m["class"]:    line += f" — {esc(m['class'])}"
-            if m["level"]:    line += f" Lv\\.{m['level']}"
-            if m["username"]: line += f" (@{esc(m['username'])})"
-            lines.append(line)
+        party = " · ".join(
+            f"{['❌','⏳','✅'][m['accepted']+1]} {m['ign']}"
+            + (f" (@{m['username']})" if m["username"] else "")
+            for m in members
+        )
+        lines.append(f"👥 {party}")
     return "\n".join(lines)
 
 def fmt_runs_grouped(runs):
-    """Group runs by status with separators."""
+    """Group runs by status with dividers between each run."""
+    RUN_DIVIDER     = "- - - - - - - - - - - - - -"
+    SECTION_DIVIDER = "──────────────"
+
     pending   = [r for r in runs if r["status"] == "pending"]
     confirmed = [r for r in runs if r["status"] == "confirmed"]
-    lines     = []
+    lines     = ["📅 UPCOMING RUNS"]
 
     if confirmed:
-        lines.append("✅ *CONFIRMED RUNS*")
-        lines.append("━━━━━━━━━━━━━━━━━━")
-        for run in confirmed:
+        lines.append("")
+        lines.append("✅ CONFIRMED")
+        lines.append(SECTION_DIVIDER)
+        for i, run in enumerate(confirmed):
             lines.append(fmt_run(run, db.get_run_members(run["id"])))
-            lines.append("")
+            if i < len(confirmed) - 1:
+                lines.append(RUN_DIVIDER)
 
     if pending:
-        lines.append("⏳ *PENDING RUNS*")
-        lines.append("━━━━━━━━━━━━━━━━━━")
-        for run in pending:
+        lines.append("")
+        lines.append("⏳ PENDING")
+        lines.append(SECTION_DIVIDER)
+        for i, run in enumerate(pending):
             lines.append(fmt_run(run, db.get_run_members(run["id"])))
-            lines.append("")
+            if i < len(pending) - 1:
+                lines.append(RUN_DIVIDER)
 
     return "\n".join(lines)
 
@@ -1074,14 +1080,14 @@ async def cmd_myruns(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = fmt_runs_grouped(runs)
     if not text.strip():
         await update.message.reply_text("No upcoming runs."); return
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 async def cmd_runs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     runs = db.get_active_runs()
     if not runs:
         await update.message.reply_text("No upcoming runs scheduled."); return
     text = fmt_runs_grouped(runs)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 # ── /chatid & /version ────────────────────────────────────────────────────────
 
