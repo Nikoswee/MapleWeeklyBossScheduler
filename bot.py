@@ -85,12 +85,10 @@ def fmt_run(run, members=None):
     icon     = diff_icon(run["difficulty"])
     sgt      = get_run_dt(run) + timedelta(hours=8)
     time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
-    status   = f"*{run['status'].upper()}*"
     lines = [
         f"⚔️ #{run['id']} · {run['boss_name']} {run['difficulty']} {icon}",
         f"📅 {time_str}",
         f"👑 @{run['leader_username']}",
-        f"📋 {status}",
     ]
     if members:
         total    = len(members)
@@ -1089,14 +1087,14 @@ async def cmd_myruns(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = fmt_runs_grouped(runs)
     if not text.strip():
         await update.message.reply_text("No upcoming runs."); return
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 async def cmd_runs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     runs = db.get_active_runs()
     if not runs:
         await update.message.reply_text("No upcoming runs scheduled."); return
     text = fmt_runs_grouped(runs)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 # ── /chatid & /version ────────────────────────────────────────────────────────
 
