@@ -65,13 +65,6 @@ DIFF_EMOJI = {"easy": "🟢", "normal": "🔵", "hard": "🟠", "chaos": "🔴",
 def diff_icon(diff):
     return DIFF_EMOJI.get(diff.lower(), "⚪")
 
-def esc(text):
-    if not text:
-        return ""
-    for ch in ["_", "*", "[", "]", "`"]:
-        text = str(text).replace(ch, f"\\{ch}")
-    return text
-
 def get_run_dt(run):
     run_dt = run["run_at"]
     if isinstance(run_dt, str):
@@ -81,7 +74,6 @@ def get_run_dt(run):
     return run_dt
 
 def fmt_run(run, members=None):
-    """Single run — plain text, no Markdown."""
     icon     = diff_icon(run["difficulty"])
     sgt      = get_run_dt(run) + timedelta(hours=8)
     time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
@@ -93,29 +85,24 @@ def fmt_run(run, members=None):
     if members:
         total    = len(members)
         accepted = sum(1 for m in members if m["accepted"] == 1)
-        pending  = [m for m in members if m["accepted"] == 0]
-        declined = [m for m in members if m["accepted"] == -1]
+        waiting  = [m for m in members if m["accepted"] != 1]
         party    = f"👥 {accepted}/{total} accepted"
-        waiting  = pending + declined
         if waiting:
             names = ", ".join(
                 m["ign"] + (f" (@{m['username']})" if m["username"] else "")
                 for m in waiting
             )
-            label = "Pending" if not declined else "Pending/Declined"
+            label = "Pending/Declined" if any(m["accepted"] == -1 for m in waiting) else "Pending"
             party += f" · {label}: {names}"
         lines.append(party)
     return "\n".join(lines)
 
 def fmt_runs_grouped(runs):
-    """Group runs by status with dividers between each run."""
     RUN_DIVIDER     = "- - - - - - - - - - - - - -"
     SECTION_DIVIDER = "──────────────"
-
     pending   = [r for r in runs if r["status"] == "pending"]
     confirmed = [r for r in runs if r["status"] == "confirmed"]
     lines     = ["📅 UPCOMING RUNS"]
-
     if confirmed:
         lines.append("")
         lines.append("✅ CONFIRMED")
@@ -124,7 +111,6 @@ def fmt_runs_grouped(runs):
             lines.append(fmt_run(run, db.get_run_members(run["id"])))
             if i < len(confirmed) - 1:
                 lines.append(RUN_DIVIDER)
-
     if pending:
         lines.append("")
         lines.append("⏳ PENDING")
@@ -133,7 +119,6 @@ def fmt_runs_grouped(runs):
             lines.append(fmt_run(run, db.get_run_members(run["id"])))
             if i < len(pending) - 1:
                 lines.append(RUN_DIVIDER)
-
     return "\n".join(lines)
 
 def get_reminder_str(reminder_mins):
@@ -143,7 +128,14 @@ def get_reminder_str(reminder_mins):
     )
     return s
 
-# ── Creator ownership check ───────────────────────────────────────────────────
+def fmt_party_lines(members):
+    return "\n".join(
+        f"  {['❌','⏳','✅'][m['accepted']+1]} {m['ign']}"
+        + (f" (@{m['username']})" if m["username"] else "")
+        for m in members
+    )
+
+# ── Creator / editor checks ───────────────────────────────────────────────────
 
 async def _check_creator(query, ctx) -> bool:
     if not ctx.user_data.get("creator_id"):
@@ -237,40 +229,39 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.upsert_user(update.effective_user.id, update.effective_user.username or "")
     log.info(f"/start from {update.effective_user.id} @{update.effective_user.username}")
     await update.message.reply_text(
-        "🍄 *MapleStory Boss Scheduler*\n\n"
-        "Schedule boss runs with your guild — all buttons, no typing\\!\n\n"
-        "*Getting started:*\n"
-        "`/register Ayumilove Bowmaster 275`\n"
-        "`/bosses` — see all bosses\n"
-        "`/allchars` — see guild characters\n\n"
-        "*Party leaders:*\n"
-        "`/createrun` — guided run creator\n"
-        "`/editrun <run\\_id>` — edit a run\n\n"
-        "*Members:*\n"
-        "`/myruns` — your invitations\n\n"
-        "Type `/help` for all commands\\.",
-        parse_mode="MarkdownV2"
+        "🍄 MapleStory Boss Scheduler\n\n"
+        "Schedule boss runs with your guild — all buttons!\n\n"
+        "Getting started:\n"
+        "/register <IGN> [Class] [Level]\n"
+        "/bosses — see all bosses\n"
+        "/allchars — see guild characters\n\n"
+        "Party leaders:\n"
+        "/createrun — guided run creator\n"
+        "/editrun <run_id> — edit a run\n"
+        "/resendrun <run_id> — resend invites\n\n"
+        "Members:\n"
+        "/myruns — your invitations\n\n"
+        "Type /help for all commands."
     )
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📋 *All Commands*\n\n"
-        "*Characters*\n"
-        "`/register <IGN> [Class] [Level]`\n"
-        "`/chars` — your characters\n"
-        "`/removechar <IGN>`\n"
-        "`/allchars` — all guild characters\n\n"
-        "*Bosses*\n"
-        "`/bosses`\n\n"
-        "*Scheduling*\n"
-        "`/createrun` — create a run\n"
-        "`/editrun <run_id>` — edit date/time or members\n"
-        "`/resendrun <run_id>` — resend invite to pending members\n"
-        "`/cancelrun <run_id>`\n"
-        "`/myruns` — your invitations\n"
-        "`/runs` — all upcoming runs\n\n"
-        "📅 All times SGT \\(UTC\\+8\\)",
-        parse_mode="MarkdownV2"
+        "📋 All Commands\n\n"
+        "Characters:\n"
+        "/register <IGN> [Class] [Level]\n"
+        "/chars — your characters\n"
+        "/removechar <IGN>\n"
+        "/allchars — all guild characters\n\n"
+        "Bosses:\n"
+        "/bosses\n\n"
+        "Scheduling:\n"
+        "/createrun — create a run\n"
+        "/editrun <run_id> — edit date/time or members\n"
+        "/cancelrun <run_id>\n"
+        "/resendrun <run_id> — resend invites to pending\n"
+        "/myruns — your invitations\n"
+        "/runs — all upcoming runs\n\n"
+        "All times SGT (UTC+8)"
     )
 
 # ── Character & boss commands ─────────────────────────────────────────────────
@@ -278,69 +269,66 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.upsert_user(update.effective_user.id, update.effective_user.username or "")
     if not ctx.args:
-        await update.message.reply_text(
-            "Usage: `/register <IGN> [Class] [Level]`\nExample: `/register Ayumilove Bowmaster 275`",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("Usage: /register <IGN> [Class] [Level]\nExample: /register Ayumilove Bowmaster 275")
         return
     ign   = ctx.args[0]
     cls   = ctx.args[1] if len(ctx.args) > 1 else None
     level = int(ctx.args[2]) if len(ctx.args) > 2 and ctx.args[2].isdigit() else None
     ok    = db.add_character(update.effective_user.id, ign, cls, level)
     if ok:
-        parts = [f"✅ Registered *{esc(ign)}*"]
-        if cls:   parts.append(f"Class: {esc(cls)}")
+        parts = [f"✅ Registered {ign}"]
+        if cls:   parts.append(f"Class: {cls}")
         if level: parts.append(f"Level: {level}")
-        await update.message.reply_text(" | ".join(parts), parse_mode="Markdown")
+        await update.message.reply_text(" | ".join(parts))
     else:
-        await update.message.reply_text(f"⚠️ IGN *{esc(ign)}* is already registered.", parse_mode="Markdown")
+        await update.message.reply_text(f"⚠️ IGN {ign} is already registered.")
 
 async def cmd_chars(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chars = db.get_characters(update.effective_user.id)
     if not chars:
-        await update.message.reply_text("No characters yet. Use `/register`.", parse_mode="Markdown")
+        await update.message.reply_text("No characters yet. Use /register.")
         return
-    lines = ["👤 *Your Characters*\n"]
+    lines = ["👤 Your Characters\n"]
     for ch in chars:
-        line = f"• *{esc(ch['ign'])}*"
-        if ch["class"]: line += f" — {esc(ch['class'])}"
+        line = f"• {ch['ign']}"
+        if ch["class"]: line += f" — {ch['class']}"
         if ch["level"]: line += f" Lv.{ch['level']}"
         lines.append(line)
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 async def cmd_allchars(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chars = db.get_all_characters()
     if not chars:
         await update.message.reply_text("No characters registered yet.")
         return
-    lines = ["🌍 *All Guild Characters*\n"]
+    lines = ["🌍 All Guild Characters\n"]
     for ch in chars:
-        line = f"• *{esc(ch['ign'])}*"
-        if ch["class"]:    line += f" — {esc(ch['class'])}"
+        line = f"• {ch['ign']}"
+        if ch["class"]:    line += f" — {ch['class']}"
         if ch["level"]:    line += f" Lv.{ch['level']}"
-        if ch["username"]: line += f" (@{esc(ch['username'])})"
+        if ch["username"]: line += f" (@{ch['username']})"
         lines.append(line)
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 async def cmd_removechar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("Usage: `/removechar <IGN>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: /removechar <IGN>")
         return
     ok  = db.remove_character(update.effective_user.id, ctx.args[0])
-    msg = f"🗑️ Removed *{esc(ctx.args[0])}*." if ok else f"⚠️ No character *{esc(ctx.args[0])}* on your account."
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    msg = f"🗑️ Removed {ctx.args[0]}." if ok else f"⚠️ No character {ctx.args[0]} on your account."
+    await update.message.reply_text(msg)
 
 async def cmd_bosses(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bosses  = db.get_all_bosses()
     grouped = {}
     for b in bosses:
         grouped.setdefault(b["name"], []).append(b["difficulty"])
-    lines = ["⚔️ *Available Bosses*\n"]
+    lines = ["⚔️ Available Bosses\n"]
     for name, diffs in grouped.items():
         icons = "  ".join(f"{diff_icon(d)} {d}" for d in diffs)
-        lines.append(f"*{esc(name)}*\n  {icons}\n")
+        lines.append(f"{name}\n  {icons}\n")
     lines.append("🟢Easy 🔵Normal 🟠Hard 🔴Chaos ⚫Extreme")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 # ── /createrun ────────────────────────────────────────────────────────────────
 
@@ -348,23 +336,20 @@ async def createrun_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.upsert_user(update.effective_user.id, update.effective_user.username or "")
     ctx.user_data.clear()
     ctx.user_data["creator_id"] = update.effective_user.id
-
     bosses  = db.get_all_bosses()
     grouped = {}
     for b in bosses:
         grouped.setdefault(b["name"], []).append(b["difficulty"])
     ctx.user_data["boss_map"]  = grouped
     ctx.user_data["boss_list"] = list(grouped.keys())
-
     keyboard = [
         [InlineKeyboardButton(name, callback_data=f"boss_{i}")]
         for i, name in enumerate(grouped)
     ]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
     await update.message.reply_text(
-        "⚔️ *Create a Boss Run*\n\n*Step 1 of 6* — Which boss?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        "⚔️ Create a Boss Run\n\nStep 1 of 6 — Which boss?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return SELECT_BOSS
 
@@ -386,8 +371,8 @@ async def step_select_boss(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ]
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
     await query.edit_message_text(
-        f"⚔️ *Create a Boss Run*\n\nBoss: *{esc(boss_name)}*\n\n*Step 2 of 6* — Difficulty?",
-        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        f"⚔️ Create a Boss Run\n\nBoss: {boss_name}\n\nStep 2 of 6 — Difficulty?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return SELECT_DIFF
 
@@ -421,9 +406,9 @@ async def _render_member_picker(query, ctx):
         InlineKeyboardButton("❌ Cancel", callback_data="cx"),
     ])
     await query.edit_message_text(
-        f"⚔️ *Create a Boss Run*\n\nBoss: *{esc(boss_name)} {esc(difficulty)}*\n\n"
-        f"*Step 3 of 6* — Select party members:\n_(tap to toggle)_",
-        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        f"⚔️ Create a Boss Run\n\nBoss: {boss_name} {difficulty}\n\n"
+        f"Step 3 of 6 — Select party members:\n(tap to toggle)",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return SELECT_MEMBERS
 
@@ -449,7 +434,7 @@ async def step_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["selected_chars"] = selected
     return await _render_member_picker(query, ctx)
 
-async def _render_calendar(query, ctx, prefix=""):
+async def _render_calendar(query, ctx, edit=False):
     now  = datetime.now(timezone(timedelta(hours=8)))
     year = ctx.user_data.get("cal_year",  now.year)
     mon  = ctx.user_data.get("cal_month", now.month)
@@ -457,13 +442,12 @@ async def _render_calendar(query, ctx, prefix=""):
     ctx.user_data["cal_month"] = mon
     boss_name  = ctx.user_data.get("boss_name", "")
     difficulty = ctx.user_data.get("difficulty", "")
-    step_label = "Step 4 of 6" if not prefix else "Edit Run"
+    label      = "Edit Run" if edit else f"Step 4 of 6"
     await query.edit_message_text(
-        f"⚔️ *{step_label}*\n\nBoss: *{esc(boss_name)} {esc(difficulty)}*\n\n"
-        f"📅 Pick a date (SGT):",
-        reply_markup=build_calendar(year, mon), parse_mode="Markdown"
+        f"⚔️ {label}\n\nBoss: {boss_name} {difficulty}\n\n📅 Pick a date (SGT):",
+        reply_markup=build_calendar(year, mon)
     )
-    return SELECT_DATE if not prefix else EDIT_DATE
+    return EDIT_DATE if edit else SELECT_DATE
 
 async def step_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -496,13 +480,12 @@ async def _render_hour_picker(query, ctx, edit=False):
     boss_name  = ctx.user_data.get("boss_name", "")
     difficulty = ctx.user_data.get("difficulty", "")
     y, mo, d   = ctx.user_data["run_year"], ctx.user_data["run_month"], ctx.user_data["run_day"]
-    step_label = "Step 5 of 6" if not edit else "Edit Run"
+    label      = "Edit Run" if edit else "Step 5 of 6"
     await query.edit_message_text(
-        f"⚔️ *{step_label}*\n\nBoss: *{esc(boss_name)} {esc(difficulty)}*\n"
-        f"Date: *{d:02d}/{mo:02d}/{y}*\n\n🕐 Pick an hour (SGT, 24h):",
-        reply_markup=build_hour_picker(ctx.user_data.get("run_hour")), parse_mode="Markdown"
+        f"⚔️ {label}\n\nBoss: {boss_name} {difficulty}\nDate: {d:02d}/{mo:02d}/{y}\n\n🕐 Pick an hour (SGT, 24h):",
+        reply_markup=build_hour_picker(ctx.user_data.get("run_hour"))
     )
-    return SELECT_HOUR if not edit else EDIT_HOUR
+    return EDIT_HOUR if edit else SELECT_HOUR
 
 async def step_select_hour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -521,13 +504,12 @@ async def _render_minute_picker(query, ctx, edit=False):
     y, mo, d   = ctx.user_data["run_year"], ctx.user_data["run_month"], ctx.user_data["run_day"]
     hour       = ctx.user_data["run_hour"]
     minute     = ctx.user_data.get("run_minute", 0)
-    step_label = "Step 5 of 6" if not edit else "Edit Run"
+    label      = "Edit Run" if edit else "Step 5 of 6"
     await query.edit_message_text(
-        f"⚔️ *{step_label}*\n\nBoss: *{esc(boss_name)} {esc(difficulty)}*\n"
-        f"Date: *{d:02d}/{mo:02d}/{y}* at *{hour:02d}:{minute:02d} SGT*\n\n⏱ Pick minutes:",
-        reply_markup=build_minute_picker(minute), parse_mode="Markdown"
+        f"⚔️ {label}\n\nBoss: {boss_name} {difficulty}\nDate: {d:02d}/{mo:02d}/{y} at {hour:02d}:{minute:02d} SGT\n\n⏱ Pick minutes:",
+        reply_markup=build_minute_picker(minute)
     )
-    return SELECT_MINUTE if not edit else EDIT_MINUTE
+    return EDIT_MINUTE if edit else SELECT_MINUTE
 
 async def step_select_minute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -551,10 +533,10 @@ async def _render_reminder_picker(query, ctx):
     d, mo, y   = ctx.user_data["run_day"], ctx.user_data["run_month"], ctx.user_data["run_year"]
     h, m       = ctx.user_data["run_hour"], ctx.user_data["run_minute"]
     await query.edit_message_text(
-        f"⚔️ *Create a Boss Run*\n\nBoss: *{esc(boss_name)} {esc(difficulty)}*\n"
-        f"Date: *{d:02d}/{mo:02d}/{y} {h:02d}:{m:02d} SGT*\n\n"
-        f"*Step 6 of 6* — Set a reminder for all participants?",
-        reply_markup=build_reminder_keyboard(), parse_mode="Markdown"
+        f"⚔️ Create a Boss Run\n\nBoss: {boss_name} {difficulty}\n"
+        f"Date: {d:02d}/{mo:02d}/{y} {h:02d}:{m:02d} SGT\n\n"
+        f"Step 6 of 6 — Set a reminder for all participants?",
+        reply_markup=build_reminder_keyboard()
     )
     return SELECT_REMINDER
 
@@ -578,29 +560,25 @@ async def _render_confirmation(query, ctx):
     y, mo, d      = ctx.user_data["run_year"], ctx.user_data["run_month"], ctx.user_data["run_day"]
     hour, minute  = ctx.user_data["run_hour"], ctx.user_data["run_minute"]
     reminder_mins = ctx.user_data.get("reminder_minutes", 0)
-
     sgt_dt = datetime(y, mo, d, hour, minute, tzinfo=timezone(timedelta(hours=8)))
     if sgt_dt <= datetime.now(timezone(timedelta(hours=8))):
-        await query.edit_message_text("⚠️ That date/time is in the past. Use `/createrun` to start over.", parse_mode="Markdown")
+        await query.edit_message_text("⚠️ That date/time is in the past. Use /createrun to start over.")
         ctx.user_data.clear(); return ConversationHandler.END
-
     ctx.user_data["run_at_iso"] = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     chars        = [db.get_character_by_id(cid) for cid in selected]
-    member_names = ", ".join(esc(ch["ign"]) for ch in chars if ch)
+    member_names = ", ".join(ch["ign"] for ch in chars if ch)
     reminder_str = get_reminder_str(reminder_mins)
-
     await query.edit_message_text(
-        f"📋 *Run Summary — Please confirm:*\n\n"
-        f"⚔️ {diff_icon(difficulty)} *{esc(boss_name)} {esc(difficulty)}*\n"
+        f"📋 Run Summary — Please confirm:\n\n"
+        f"⚔️ {diff_icon(difficulty)} {boss_name} {difficulty}\n"
         f"📅 {d:02d}/{mo:02d}/{y} {hour:02d}:{minute:02d} SGT\n"
-        f"⏰ Reminder: *{reminder_str}*\n\n"
-        f"👥 *Party ({len(chars)}):* {member_names}\n\n"
-        f"Tap *Confirm* to create and notify all members.",
+        f"⏰ Reminder: {reminder_str}\n\n"
+        f"👥 Party ({len(chars)}): {member_names}\n\n"
+        f"Tap Confirm to create and notify all members.",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Confirm & Notify", callback_data="run_confirm"),
             InlineKeyboardButton("❌ Cancel",            callback_data="cx"),
-        ]]),
-        parse_mode="Markdown"
+        ]])
     )
     return CONFIRM_RUN
 
@@ -611,7 +589,6 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if query.data == "cx":
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
-
     boss_name     = ctx.user_data["boss_name"]
     difficulty    = ctx.user_data["difficulty"]
     run_at_iso    = ctx.user_data["run_at_iso"]
@@ -619,22 +596,19 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     reminder_mins = ctx.user_data.get("reminder_minutes", 0)
     y, mo, d      = ctx.user_data["run_year"], ctx.user_data["run_month"], ctx.user_data["run_day"]
     hour, minute  = ctx.user_data["run_hour"], ctx.user_data["run_minute"]
-
     boss   = db.find_boss(boss_name, difficulty)
     run_id = db.create_run(boss["id"], update.effective_user.id, run_at_iso)
     for char_id in selected:
         db.add_run_member(run_id, char_id)
-
     if reminder_mins > 0:
         sgt_dt    = datetime(y, mo, d, hour, minute, tzinfo=timezone(timedelta(hours=8)))
         remind_dt = sgt_dt - timedelta(minutes=reminder_mins)
         if remind_dt > datetime.now(timezone.utc):
             db.set_run_reminder(run_id, remind_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
-
-    await _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute, reminder_mins,
-                      update.effective_user.username or str(update.effective_user.id),
+    await query.edit_message_text(f"🎉 Run #{run_id} created! Notifying members...")
+    await _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute,
+                      reminder_mins, update.effective_user.username or str(update.effective_user.id),
                       update.effective_chat.id, is_edit=False)
-
     ctx.user_data.clear()
     return ConversationHandler.END
 
@@ -643,27 +617,27 @@ async def createrun_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Run creation cancelled.")
     return ConversationHandler.END
 
-# ── Shared notification helper ─────────────────────────────────────────────────
+# ── Shared notification helper ────────────────────────────────────────────────
 
 async def _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute,
                        reminder_mins, leader, chat_id, is_edit=False):
     members      = db.get_run_members(run_id)
     time_str     = f"{d:02d}/{mo:02d}/{y} {hour:02d}:{minute:02d} SGT"
     reminder_str = get_reminder_str(reminder_mins)
-    action_word  = "✏️ *A boss run has been updated\\!*" if is_edit else "📨 *You've been invited to a boss run\\!*"
+    verb         = "updated" if is_edit else "invited to a"
 
     invite_text = (
-        f"{action_word}\n\n"
-        f"⚔️ {diff_icon(difficulty)} *{esc(boss_name)} {esc(difficulty)}*\n"
+        f"📨 You've been {verb} boss run!\n\n"
+        f"⚔️ {diff_icon(difficulty)} {boss_name} {difficulty}\n"
         f"📅 {time_str}\n"
         f"⏰ Reminder: {reminder_str}\n"
-        f"👑 Leader: @{esc(leader)}\n\n"
-        f"👥 *Party:*\n"
+        f"👑 Leader: @{leader}\n\n"
+        f"👥 Party:\n"
         + "\n".join(
-            f"  ⏳ *{esc(m['ign'])}*" + (f" (@{esc(m['username'])})" if m["username"] else "")
+            f"  ⏳ {m['ign']}" + (f" (@{m['username']})" if m["username"] else "")
             for m in members
         )
-        + f"\n\nRun \\#{run_id} — tap below to respond:"
+        + f"\n\nRun #{run_id} — tap below to respond:"
     )
     invite_kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Accept",  callback_data=f"rsvp_accept_{run_id}"),
@@ -675,8 +649,7 @@ async def _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute
         try:
             log.info(f"DM → {m['ign']} | id:{m['telegram_id']}")
             await ctx.bot.send_message(
-                chat_id=m["telegram_id"], text=invite_text,
-                reply_markup=invite_kb, parse_mode="MarkdownV2"
+                chat_id=m["telegram_id"], text=invite_text, reply_markup=invite_kb
             )
             notified.append(m["ign"])
         except Exception as e:
@@ -684,24 +657,25 @@ async def _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute
             failed.append(m["ign"])
 
     if GROUP_CHAT_ID:
-        tags = " ".join(f"@{esc(m['username'])}" if m["username"] else esc(m["ign"]) for m in members)
-        verb = "Updated" if is_edit else "New"
+        tags = " ".join(f"@{m['username']}" if m["username"] else m["ign"] for m in members)
+        verb_g = "Updated" if is_edit else "New"
         try:
             await ctx.bot.send_message(
                 chat_id=GROUP_CHAT_ID,
                 text=(
-                    f"📢 *{verb} Boss Run*\n\n"
-                    f"⚔️ {diff_icon(difficulty)} *{esc(boss_name)} {esc(difficulty)}*\n"
-                    f"📅 {time_str}\n⏰ Reminder: {reminder_str}\n"
-                    f"👑 Leader: @{esc(leader)}\n\nInvited: {tags}\nCheck your DMs\\!"
-                ),
-                parse_mode="MarkdownV2"
+                    f"📢 {verb_g} Boss Run\n\n"
+                    f"⚔️ {diff_icon(difficulty)} {boss_name} {difficulty}\n"
+                    f"📅 {time_str}\n"
+                    f"⏰ Reminder: {reminder_str}\n"
+                    f"👑 Leader: @{leader}\n\n"
+                    f"Invited: {tags}\n"
+                    f"Check your DMs to accept/decline!"
+                )
             )
         except Exception as e:
             log.warning(f"Group post failed: {e}")
 
-    action = "updated" if is_edit else "created"
-    summary = f"✅ Run #{run_id} {action}! {len(notified)} member(s) notified via DM."
+    summary = f"✅ Run #{run_id} {'updated' if is_edit else 'created'}! {len(notified)} member(s) notified via DM."
     if failed:
         summary += f"\n⚠️ Couldn't DM: {', '.join(failed)} — they need to send /start to the bot first."
     await ctx.bot.send_message(chat_id=chat_id, text=summary)
@@ -711,28 +685,20 @@ async def _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute
 async def editrun_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.upsert_user(update.effective_user.id, update.effective_user.username or "")
     if not ctx.args:
-        await update.message.reply_text("Usage: `/editrun <run_id>`", parse_mode="Markdown")
-        return ConversationHandler.END
+        await update.message.reply_text("Usage: /editrun <run_id>"); return ConversationHandler.END
     try:
         run_id = int(ctx.args[0])
     except ValueError:
-        await update.message.reply_text("⚠️ Run ID must be a number.", parse_mode="Markdown")
-        return ConversationHandler.END
-
+        await update.message.reply_text("⚠️ Run ID must be a number."); return ConversationHandler.END
     run = db.get_run(run_id)
     if not run:
-        await update.message.reply_text(f"⚠️ Run #{run_id} not found.", parse_mode="Markdown")
-        return ConversationHandler.END
+        await update.message.reply_text(f"⚠️ Run #{run_id} not found."); return ConversationHandler.END
     if run["leader_id"] != update.effective_user.id:
-        await update.message.reply_text("⚠️ Only the run creator can edit this run.", parse_mode="Markdown")
-        return ConversationHandler.END
+        await update.message.reply_text("⚠️ Only the run creator can edit this run."); return ConversationHandler.END
     if run["status"] == "cancelled":
-        await update.message.reply_text("⚠️ This run has been cancelled.", parse_mode="Markdown")
-        return ConversationHandler.END
-    run_dt = get_run_dt(run)
-    if run_dt <= datetime.now(timezone.utc):
-        await update.message.reply_text("⚠️ This run has already passed.", parse_mode="Markdown")
-        return ConversationHandler.END
+        await update.message.reply_text("⚠️ This run has been cancelled."); return ConversationHandler.END
+    if get_run_dt(run) <= datetime.now(timezone.utc):
+        await update.message.reply_text("⚠️ This run has already passed."); return ConversationHandler.END
 
     ctx.user_data.clear()
     ctx.user_data["editor_id"]   = update.effective_user.id
@@ -740,19 +706,18 @@ async def editrun_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["boss_name"]   = run["boss_name"]
     ctx.user_data["difficulty"]  = run["difficulty"]
 
-    sgt      = run_dt + timedelta(hours=8)
+    sgt      = get_run_dt(run) + timedelta(hours=8)
     time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
 
     await update.message.reply_text(
-        f"✏️ *Edit Run \\#{run_id}*\n\n"
-        f"⚔️ {diff_icon(run['difficulty'])} *{esc(run['boss_name'])} {esc(run['difficulty'])}*\n"
+        f"✏️ Edit Run #{run_id}\n\n"
+        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
         f"📅 {time_str}\n\nWhat would you like to edit?",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📅 Date & Time", callback_data="edit_datetime")],
             [InlineKeyboardButton("👥 Party Members", callback_data="edit_members")],
             [InlineKeyboardButton("❌ Cancel", callback_data="cx")],
-        ]),
-        parse_mode="MarkdownV2"
+        ])
     )
     return EDIT_CHOOSE
 
@@ -763,98 +728,17 @@ async def edit_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if query.data == "cx":
         await query.edit_message_text("❌ Edit cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
-
     if query.data == "edit_datetime":
         now = datetime.now(timezone(timedelta(hours=8)))
         ctx.user_data["cal_year"]  = now.year
         ctx.user_data["cal_month"] = now.month
-        return await _render_edit_calendar(query, ctx)
-
+        return await _render_calendar(query, ctx, edit=True)
     if query.data == "edit_members":
-        # Pre-select current members
         run_id  = ctx.user_data["edit_run_id"]
         current = db.get_run_members(run_id)
         ctx.user_data["selected_chars"] = [m["character_id"] for m in current]
         return await _render_edit_member_picker(query, ctx)
-
     return EDIT_CHOOSE
-
-async def _render_edit_calendar(query, ctx):
-    year = ctx.user_data.get("cal_year")
-    mon  = ctx.user_data.get("cal_month")
-    run_id = ctx.user_data["edit_run_id"]
-    await query.edit_message_text(
-        f"✏️ *Edit Run \\#{run_id}* — Pick a new date \\(SGT\\):",
-        reply_markup=build_calendar(year, mon),
-        parse_mode="MarkdownV2"
-    )
-    return EDIT_DATE
-
-async def cmd_resendrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/resendrun <run_id>`", parse_mode="Markdown")
-        return
-    try:
-        run_id = int(ctx.args[0])
-    except ValueError:
-        await update.message.reply_text("⚠️ Run ID must be a number.", parse_mode="Markdown")
-        return
-
-    run = db.get_run(run_id)
-    if not run:
-        await update.message.reply_text(f"⚠️ Run #{run_id} not found.", parse_mode="Markdown")
-        return
-    if run["leader_id"] != update.effective_user.id:
-        await update.message.reply_text("⚠️ Only the run leader can resend invites.", parse_mode="Markdown")
-        return
-    if run["status"] == "cancelled":
-        await update.message.reply_text("⚠️ This run has been cancelled.", parse_mode="Markdown")
-        return
-
-    members = db.get_run_members(run_id)
-    pending = [m for m in members if m["accepted"] == 0]
-
-    if not pending:
-        await update.message.reply_text(
-            f"ℹ️ No pending members for Run #{run_id} — everyone has already responded.",
-            parse_mode="Markdown"
-        )
-        return
-
-    run_dt   = get_run_dt(run)
-    sgt      = run_dt + timedelta(hours=8)
-    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
-    leader   = update.effective_user.username or str(update.effective_user.id)
-
-    invite_text = (
-        f"📨 Reminder: You haven't responded to this boss run yet!\n\n"
-        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-        f"📅 {time_str}\n"
-        f"👑 Leader: @{leader}\n\n"
-        f"Please respond:"
-    )
-    invite_kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Accept",  callback_data=f"rsvp_accept_{run_id}"),
-        InlineKeyboardButton("❌ Decline", callback_data=f"rsvp_decline_{run_id}"),
-    ]])
-
-    notified, failed = [], []
-    for m in pending:
-        try:
-            await ctx.bot.send_message(
-                chat_id=m["telegram_id"],
-                text=invite_text,
-                reply_markup=invite_kb
-            )
-            notified.append(m["ign"])
-        except Exception as e:
-            log.warning(f"Resend failed → {m['ign']} (id:{m['telegram_id']}): {e}")
-            failed.append(m["ign"])
-
-    summary = f"✅ Resent invite to {len(notified)} pending member(s): {', '.join(notified)}"
-    if failed:
-        summary += f"\n⚠️ Still couldn't DM: {', '.join(failed)}"
-    await update.message.reply_text(summary)
 
 async def edit_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -875,7 +759,7 @@ async def edit_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if month > 12: month = 1; year += 1
         ctx.user_data["cal_year"]  = year
         ctx.user_data["cal_month"] = month
-        return await _render_edit_calendar(query, ctx)
+        return await _render_calendar(query, ctx, edit=True)
     if parts[1] == "day":
         ctx.user_data["run_year"]  = int(parts[2])
         ctx.user_data["run_month"] = int(parts[3])
@@ -911,33 +795,23 @@ async def edit_select_minute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await _render_minute_picker(query, ctx, edit=True)
 
 async def _apply_datetime_edit(query, ctx):
-    run_id = ctx.user_data["edit_run_id"]
-    y, mo, d = ctx.user_data["run_year"], ctx.user_data["run_month"], ctx.user_data["run_day"]
+    run_id       = ctx.user_data["edit_run_id"]
+    y, mo, d     = ctx.user_data["run_year"], ctx.user_data["run_month"], ctx.user_data["run_day"]
     hour, minute = ctx.user_data["run_hour"], ctx.user_data["run_minute"]
-
     sgt_dt = datetime(y, mo, d, hour, minute, tzinfo=timezone(timedelta(hours=8)))
     if sgt_dt <= datetime.now(timezone(timedelta(hours=8))):
-        await query.edit_message_text("⚠️ That date/time is in the past. Use `/editrun` to try again.", parse_mode="Markdown")
+        await query.edit_message_text("⚠️ That date/time is in the past. Use /editrun to try again.")
         ctx.user_data.clear(); return ConversationHandler.END
-
     run_at_iso = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     db.update_run_time(run_id, run_at_iso)
-
-    run     = db.get_run(run_id)
-    members = db.get_run_members(run_id)
-    leader  = query.from_user.username or str(query.from_user.id)
-
+    run    = db.get_run(run_id)
+    leader = query.from_user.username or str(query.from_user.id)
     await query.edit_message_text(
-        f"✅ Run #{run_id} date/time updated to *{d:02d}/{mo:02d}/{y} {hour:02d}:{minute:02d} SGT*\\.\n"
-        f"Run reset to PENDING — members need to re\\-accept\\.",
-        parse_mode="MarkdownV2"
+        f"✅ Run #{run_id} updated to {d:02d}/{mo:02d}/{y} {hour:02d}:{minute:02d} SGT.\n"
+        f"Run reset to PENDING — members need to re-accept."
     )
-
-    await _notify_run(
-        ctx, run_id, run["boss_name"], run["difficulty"],
-        y, mo, d, hour, minute, 0,
-        leader, query.message.chat_id, is_edit=True
-    )
+    await _notify_run(ctx, run_id, run["boss_name"], run["difficulty"],
+                      y, mo, d, hour, minute, 0, leader, query.message.chat_id, is_edit=True)
     ctx.user_data.clear()
     return ConversationHandler.END
 
@@ -948,24 +822,21 @@ async def _render_edit_member_picker(query, ctx):
     run_id     = ctx.user_data["edit_run_id"]
     boss_name  = ctx.user_data["boss_name"]
     difficulty = ctx.user_data["difficulty"]
-
-    buttons = []
+    buttons    = []
     for i, ch in enumerate(all_chars):
         tick  = "✅" if ch["id"] in selected else "⬜"
         label = f"{tick} {ch['ign']}"
         if ch["level"]: label += f" {ch['level']}"
         buttons.append(InlineKeyboardButton(label, callback_data=f"etog_{i}"))
-
     keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
     keyboard.append([
         InlineKeyboardButton(f"✔️ Done ({len(selected)})", callback_data="emembers_done"),
         InlineKeyboardButton("❌ Cancel", callback_data="cx"),
     ])
     await query.edit_message_text(
-        f"✏️ *Edit Run \\#{run_id}* — Update party members:\n"
-        f"Boss: *{esc(boss_name)} {esc(difficulty)}*\n\n_(tap to toggle)_",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="MarkdownV2"
+        f"✏️ Edit Run #{run_id} — Update party members:\n"
+        f"Boss: {boss_name} {difficulty}\n\n(tap to toggle)",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return EDIT_MEMBERS
 
@@ -977,8 +848,7 @@ async def edit_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Edit cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     if query.data == "emembers_done":
-        selected = ctx.user_data.get("selected_chars", [])
-        if not selected:
+        if not ctx.user_data.get("selected_chars"):
             await query.answer("⚠️ Select at least one member first!", show_alert=True)
             return EDIT_MEMBERS
         await query.answer()
@@ -996,23 +866,17 @@ async def _apply_members_edit(query, ctx):
     run_id   = ctx.user_data["edit_run_id"]
     selected = ctx.user_data["selected_chars"]
     run      = db.get_run(run_id)
-
     db.reset_run_members(run_id, selected)
-
     run_dt   = get_run_dt(run)
     sgt      = run_dt + timedelta(hours=8)
     leader   = query.from_user.username or str(query.from_user.id)
-
     await query.edit_message_text(
-        f"✅ Run \\#{run_id} party updated \\({len(selected)} members\\)\\.\n"
-        f"Run reset to PENDING — members need to re\\-accept\\.",
-        parse_mode="MarkdownV2"
+        f"✅ Run #{run_id} party updated ({len(selected)} members).\n"
+        f"Run reset to PENDING — members need to re-accept."
     )
-    await _notify_run(
-        ctx, run_id, run["boss_name"], run["difficulty"],
-        sgt.year, sgt.month, sgt.day, sgt.hour, sgt.minute, 0,
-        leader, query.message.chat_id, is_edit=True
-    )
+    await _notify_run(ctx, run_id, run["boss_name"], run["difficulty"],
+                      sgt.year, sgt.month, sgt.day, sgt.hour, sgt.minute,
+                      0, leader, query.message.chat_id, is_edit=True)
     ctx.user_data.clear()
     return ConversationHandler.END
 
@@ -1020,6 +884,59 @@ async def editrun_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     await update.message.reply_text("❌ Edit cancelled.")
     return ConversationHandler.END
+
+# ── /resendrun ────────────────────────────────────────────────────────────────
+
+async def cmd_resendrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Usage: /resendrun <run_id>"); return
+    try:
+        run_id = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Run ID must be a number."); return
+    run = db.get_run(run_id)
+    if not run:
+        await update.message.reply_text(f"⚠️ Run #{run_id} not found."); return
+    if run["leader_id"] != update.effective_user.id:
+        await update.message.reply_text("⚠️ Only the run leader can resend invites."); return
+    if run["status"] == "cancelled":
+        await update.message.reply_text("⚠️ This run has been cancelled."); return
+
+    members = db.get_run_members(run_id)
+    pending = [m for m in members if m["accepted"] == 0]
+    if not pending:
+        await update.message.reply_text(f"ℹ️ No pending members for Run #{run_id} — everyone has already responded.")
+        return
+
+    sgt      = get_run_dt(run) + timedelta(hours=8)
+    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
+    leader   = update.effective_user.username or str(update.effective_user.id)
+
+    invite_text = (
+        f"📨 Reminder: You haven't responded to this boss run yet!\n\n"
+        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+        f"📅 {time_str}\n"
+        f"👑 Leader: @{leader}\n\n"
+        f"Please respond:"
+    )
+    invite_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Accept",  callback_data=f"rsvp_accept_{run_id}"),
+        InlineKeyboardButton("❌ Decline", callback_data=f"rsvp_decline_{run_id}"),
+    ]])
+
+    notified, failed = [], []
+    for m in pending:
+        try:
+            await ctx.bot.send_message(chat_id=m["telegram_id"], text=invite_text, reply_markup=invite_kb)
+            notified.append(m["ign"])
+        except Exception as e:
+            log.warning(f"Resend failed → {m['ign']} (id:{m['telegram_id']}): {e}")
+            failed.append(m["ign"])
+
+    summary = f"✅ Resent invite to {len(notified)} pending member(s): {', '.join(notified)}"
+    if failed:
+        summary += f"\n⚠️ Still couldn't DM: {', '.join(failed)}"
+    await update.message.reply_text(summary)
 
 # ── RSVP callbacks ────────────────────────────────────────────────────────────
 
@@ -1045,83 +962,85 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     matched = None
     for ch in user_chars:
         rm = db.get_run_member_by_char(run_id, ch["id"])
-        log.info(f"RSVP: checking char {ch['ign']} for run {run_id} → {rm}")
+        log.info(f"RSVP: checking {ch['ign']} for run {run_id} → {rm}")
         if rm:
-            matched = (ch, rm)
-            break
+            matched = (ch, rm); break
 
     if not matched:
         await query.answer("⚠️ You're not invited to this run.", show_alert=True)
-        log.warning(f"RSVP: no match found for {update.effective_user.username} in run {run_id}")
+        log.warning(f"RSVP: no match for {update.effective_user.username} in run {run_id}")
         return
 
     ch, rm = matched
-    log.info(f"RSVP: matched char {ch['ign']} | current accepted={rm['accepted']}")
+    log.info(f"RSVP: matched {ch['ign']} | current accepted={rm['accepted']}")
+
     db.set_member_response(run_id, ch["id"], accepted)
     members  = db.get_run_members(run_id)
     sgt      = get_run_dt(run) + timedelta(hours=8)
     time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
-
-    party_lines = "\n".join(
-        f"  {['❌','⏳','✅'][m['accepted']+1]} *{esc(m['ign'])}*"
-        + (f" (@{esc(m['username'])})" if m["username"] else "")
-        for m in members
-    )
+    party    = fmt_party_lines(members)
 
     if accepted == 1:
         all_confirmed = db.check_and_confirm_run(run_id)
         if all_confirmed:
             run = db.get_run(run_id)
             confirm_msg = (
-                f"🎉 *Run #{run_id} is CONFIRMED\\!* All members accepted\\.\n\n"
-                f"⚔️ {diff_icon(run['difficulty'])} *{esc(run['boss_name'])} {esc(run['difficulty'])}*\n"
-                f"📅 {time_str}\n\n👥 *Party:*\n{party_lines}"
+                f"🎉 Run #{run_id} is CONFIRMED! All members accepted.\n\n"
+                f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+                f"📅 {time_str}\n\n"
+                f"👥 Party:\n{party}"
             )
-            await query.edit_message_text(confirm_msg, parse_mode="MarkdownV2")
+            await query.edit_message_text(confirm_msg)
             for m in members:
                 if m["telegram_id"] != update.effective_user.id:
                     try:
-                        await ctx.bot.send_message(chat_id=m["telegram_id"], text=confirm_msg, parse_mode="MarkdownV2")
+                        await ctx.bot.send_message(chat_id=m["telegram_id"], text=confirm_msg)
                     except Exception as e:
                         log.warning(f"Confirm notify failed {m['ign']}: {e}")
             try:
-                await ctx.bot.send_message(chat_id=run["leader_id"], text=confirm_msg, parse_mode="MarkdownV2")
+                await ctx.bot.send_message(chat_id=run["leader_id"], text=confirm_msg)
             except Exception as e:
                 log.warning(f"Leader confirm notify failed: {e}")
             if GROUP_CHAT_ID:
                 try:
-                    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=confirm_msg, parse_mode="MarkdownV2")
+                    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=confirm_msg)
                 except Exception as e:
                     log.warning(f"Group confirm failed: {e}")
         else:
             pending = [m for m in members if m["accepted"] == 0]
+            total   = len(members)
+            done    = sum(1 for m in members if m["accepted"] == 1)
             await query.edit_message_text(
-                f"✅ *{esc(ch['ign'])}* accepted Run \\#{run_id}\\!\n\n"
-                f"⚔️ {diff_icon(run['difficulty'])} *{esc(run['boss_name'])} {esc(run['difficulty'])}*\n"
-                f"📅 {time_str}\n\n👥 *Party:*\n{party_lines}\n\n"
-                f"⏳ Still waiting on: {', '.join(esc(m['ign']) for m in pending)}",
-                parse_mode="MarkdownV2"
+                f"✅ {ch['ign']} accepted Run #{run_id}! ({done}/{total})\n\n"
+                f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+                f"📅 {time_str}\n\n"
+                f"👥 Party:\n{party}\n\n"
+                f"Still waiting on: {', '.join(m['ign'] for m in pending)}"
             )
             try:
                 await ctx.bot.send_message(
                     chat_id=run["leader_id"],
-                    text=f"ℹ️ *{esc(ch['ign'])}* accepted Run \\#{run_id}\\.\nStill waiting on: {', '.join(esc(m['ign']) for m in pending)}",
-                    parse_mode="MarkdownV2"
+                    text=(
+                        f"ℹ️ {ch['ign']} accepted Run #{run_id}. ({done}/{total})\n"
+                        f"Still waiting on: {', '.join(m['ign'] for m in pending)}"
+                    )
                 )
             except Exception as e:
                 log.warning(f"Leader notify failed: {e}")
     else:
         await query.edit_message_text(
-            f"❌ *{esc(ch['ign'])}* declined Run \\#{run_id}\\.\n\n"
-            f"⚔️ {diff_icon(run['difficulty'])} *{esc(run['boss_name'])} {esc(run['difficulty'])}*\n"
-            f"📅 {time_str}",
-            parse_mode="MarkdownV2"
+            f"❌ {ch['ign']} declined Run #{run_id}.\n\n"
+            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+            f"📅 {time_str}"
         )
         try:
             await ctx.bot.send_message(
                 chat_id=run["leader_id"],
-                text=f"❌ *{esc(ch['ign'])}* declined Run \\#{run_id}\\.\nBoss: {esc(run['boss_name'])} {esc(run['difficulty'])}\nUse `/cancelrun {run_id}` or create a new run\\.",
-                parse_mode="MarkdownV2"
+                text=(
+                    f"❌ {ch['ign']} (@{update.effective_user.username or ''}) declined Run #{run_id}.\n"
+                    f"Boss: {run['boss_name']} {run['difficulty']}\n"
+                    f"Use /cancelrun {run_id} or create a new run."
+                )
             )
         except Exception as e:
             log.warning(f"Leader decline notify failed: {e}")
@@ -1130,26 +1049,29 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_cancelrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("Usage: `/cancelrun <run_id>`", parse_mode="Markdown"); return
+        await update.message.reply_text("Usage: /cancelrun <run_id>"); return
     try:
         run_id = int(ctx.args[0])
     except ValueError:
-        await update.message.reply_text("⚠️ Run ID must be a number.", parse_mode="Markdown"); return
+        await update.message.reply_text("⚠️ Run ID must be a number."); return
     run = db.get_run(run_id)
     if not run:
-        await update.message.reply_text(f"⚠️ Run #{run_id} not found.", parse_mode="Markdown"); return
+        await update.message.reply_text(f"⚠️ Run #{run_id} not found."); return
     if run["leader_id"] != update.effective_user.id:
-        await update.message.reply_text("⚠️ Only the run leader can cancel.", parse_mode="Markdown"); return
+        await update.message.reply_text("⚠️ Only the run leader can cancel."); return
     if run["status"] == "cancelled":
-        await update.message.reply_text("ℹ️ Already cancelled.", parse_mode="Markdown"); return
+        await update.message.reply_text("ℹ️ Already cancelled."); return
     db.cancel_run(run_id)
     members = db.get_run_members(run_id)
     for m in members:
         try:
             await ctx.bot.send_message(
                 chat_id=m["telegram_id"],
-                text=f"❌ *Run \\#{run_id} cancelled\\.*\n⚔️ {diff_icon(run['difficulty'])} {esc(run['boss_name'])} {esc(run['difficulty'])}\nCancelled by @{esc(update.effective_user.username or '')}\\.",
-                parse_mode="MarkdownV2"
+                text=(
+                    f"❌ Run #{run_id} cancelled.\n"
+                    f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+                    f"Cancelled by @{update.effective_user.username or ''}."
+                )
             )
         except Exception as e:
             log.warning(f"Cancel notify failed {m['ign']}: {e}")
@@ -1161,17 +1083,13 @@ async def cmd_myruns(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     runs = db.get_user_runs(update.effective_user.id)
     if not runs:
         await update.message.reply_text("You have no upcoming run invitations."); return
-    text = fmt_runs_grouped(runs)
-    if not text.strip():
-        await update.message.reply_text("No upcoming runs."); return
-    await update.message.reply_text(text)
+    await update.message.reply_text(fmt_runs_grouped(runs))
 
 async def cmd_runs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     runs = db.get_active_runs()
     if not runs:
         await update.message.reply_text("No upcoming runs scheduled."); return
-    text = fmt_runs_grouped(runs)
-    await update.message.reply_text(text)
+    await update.message.reply_text(fmt_runs_grouped(runs))
 
 # ── /chatid & /version ────────────────────────────────────────────────────────
 
@@ -1186,7 +1104,7 @@ async def cmd_version(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sgt = datetime.now(timezone(timedelta(hours=8)))
     try:
         commit = subprocess.check_output(["git", "log", "-1", "--format=%h %ci"], text=True).strip()
-        await update.message.reply_text(f"🤖 Version: {commit} (checked {sgt.strftime('%Y-%m-%d %H:%M SGT')})")
+        await update.message.reply_text(f"🤖 Version: {commit}\nChecked: {sgt.strftime('%Y-%m-%d %H:%M SGT')}")
     except Exception:
         await update.message.reply_text(f"🤖 Started: {sgt.strftime('%Y-%m-%d %H:%M SGT')}")
 
@@ -1199,22 +1117,23 @@ async def send_reminders(app: Application):
         sgt      = get_run_dt(run) + timedelta(hours=8)
         time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
         msg = (
-            f"⏰ *Boss Run Reminder\\!*\n\n"
-            f"⚔️ {diff_icon(run['difficulty'])} *{esc(run['boss_name'])} {esc(run['difficulty'])}*\n"
-            f"📅 Starting at *{time_str}*\n\n👥 Party:\n"
+            f"⏰ Boss Run Reminder!\n\n"
+            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+            f"📅 Starting at {time_str}\n\n"
+            f"👥 Party:\n"
             + "\n".join(
-                f"  • *{esc(m['ign'])}*" + (f" (@{esc(m['username'])})" if m["username"] else "")
+                f"  • {m['ign']}" + (f" (@{m['username']})" if m["username"] else "")
                 for m in members
             )
         )
         for m in members:
             try:
-                await app.bot.send_message(chat_id=m["telegram_id"], text=msg, parse_mode="MarkdownV2")
+                await app.bot.send_message(chat_id=m["telegram_id"], text=msg)
             except Exception as e:
                 log.warning(f"Reminder failed {m['ign']}: {e}")
         if GROUP_CHAT_ID:
             try:
-                await app.bot.send_message(chat_id=GROUP_CHAT_ID, text=msg, parse_mode="MarkdownV2")
+                await app.bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
             except Exception as e:
                 log.warning(f"Group reminder failed: {e}")
 
@@ -1222,28 +1141,29 @@ async def auto_cancel_pending_runs(app: Application):
     expired = db.get_expired_pending_runs(hours=12)
     for run in expired:
         db.cancel_run(run["id"])
-        members = db.get_run_members(run["id"])
-        sgt     = get_run_dt(run) + timedelta(hours=8)
+        members  = db.get_run_members(run["id"])
+        sgt      = get_run_dt(run) + timedelta(hours=8)
         time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
         pending  = [m for m in members if m["accepted"] == 0]
         msg = (
-            f"⏰ *Run \\#{run['id']} auto\\-cancelled\\.*\n\n"
-            f"⚔️ {diff_icon(run['difficulty'])} *{esc(run['boss_name'])} {esc(run['difficulty'])}*\n"
-            f"📅 {time_str}\n\nNot everyone responded within 12 hours\\."
+            f"⏰ Run #{run['id']} auto-cancelled.\n\n"
+            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+            f"📅 {time_str}\n\n"
+            f"Not everyone responded within 12 hours."
         )
         for m in members:
             try:
-                await app.bot.send_message(chat_id=m["telegram_id"], text=msg, parse_mode="MarkdownV2")
+                await app.bot.send_message(chat_id=m["telegram_id"], text=msg)
             except Exception as e:
                 log.warning(f"Auto-cancel notify failed {m['ign']}: {e}")
         try:
             await app.bot.send_message(
                 chat_id=run["leader_id"],
                 text=(
-                    f"⏰ *Run \\#{run['id']} auto\\-cancelled* — no response within 12 hours\\.\n"
-                    f"No response from: {', '.join(esc(m['ign']) for m in pending)}\n\nUse `/createrun` to reschedule\\."
-                ),
-                parse_mode="MarkdownV2"
+                    f"⏰ Run #{run['id']} auto-cancelled — no response within 12 hours.\n"
+                    f"No response from: {', '.join(m['ign'] for m in pending)}\n\n"
+                    f"Use /createrun to reschedule."
+                )
             )
         except Exception as e:
             log.warning(f"Leader auto-cancel notify failed: {e}")
@@ -1254,7 +1174,6 @@ async def auto_cancel_pending_runs(app: Application):
 def main():
     db.init_db()
     log.info("Database initialised.")
-
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         log.error("❌ Set BOT_TOKEN as an environment variable.")
         return
@@ -1307,11 +1226,11 @@ def main():
     app.add_handler(CommandHandler("removechar", cmd_removechar))
     app.add_handler(CommandHandler("bosses",     cmd_bosses))
     app.add_handler(CommandHandler("cancelrun",  cmd_cancelrun))
+    app.add_handler(CommandHandler("resendrun",  cmd_resendrun))
     app.add_handler(CommandHandler("myruns",     cmd_myruns))
     app.add_handler(CommandHandler("runs",       cmd_runs))
     app.add_handler(CommandHandler("chatid",     cmd_chatid))
     app.add_handler(CommandHandler("version",    cmd_version))
-    app.add_handler(CommandHandler("resendrun", cmd_resendrun))
 
     async def on_startup(app: Application):
         scheduler = AsyncIOScheduler(timezone="UTC")
