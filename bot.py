@@ -1028,22 +1028,35 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 log.warning(f"Leader notify failed: {e}")
     else:
-        await query.edit_message_text(
-            f"❌ {ch['ign']} declined Run #{run_id}.\n\n"
+        # Auto-cancel the run when anyone declines
+        db.cancel_run(run_id)
+        all_members = db.get_run_members(run_id)
+        cancel_msg = (
+            f"❌ Run #{run_id} has been cancelled.\n\n"
             f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-            f"📅 {time_str}"
+            f"📅 {time_str}\n\n"
+            f"{ch['ign']} (@{update.effective_user.username or ''}) declined the invite."
         )
+        await query.edit_message_text(cancel_msg)
+        # Notify all other members
+        for m in all_members:
+            if m["telegram_id"] != update.effective_user.id:
+                try:
+                    await ctx.bot.send_message(chat_id=m["telegram_id"], text=cancel_msg)
+                except Exception as e:
+                    log.warning(f"Decline cancel notify failed {m['ign']}: {e}")
+        # Notify leader
         try:
-            await ctx.bot.send_message(
-                chat_id=run["leader_id"],
-                text=(
-                    f"❌ {ch['ign']} (@{update.effective_user.username or ''}) declined Run #{run_id}.\n"
-                    f"Boss: {run['boss_name']} {run['difficulty']}\n"
-                    f"Use /cancelrun {run_id} or create a new run."
-                )
-            )
+            await ctx.bot.send_message(chat_id=run["leader_id"], text=cancel_msg)
         except Exception as e:
-            log.warning(f"Leader decline notify failed: {e}")
+            log.warning(f"Leader decline cancel notify failed: {e}")
+        # Notify group
+        if GROUP_CHAT_ID:
+            try:
+                await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=cancel_msg)
+            except Exception as e:
+                log.warning(f"Group decline cancel notify failed: {e}")
+        log.info(f"Run #{run_id} auto-cancelled due to decline by {ch['ign']}")
 
 # ── /cancelrun ────────────────────────────────────────────────────────────────
 
