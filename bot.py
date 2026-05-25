@@ -348,7 +348,6 @@ async def _render_member_picker(query, ctx):
 
 async def step_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-        query = update.callback_query
     if not await _check_creator(query, ctx):
         return SELECT_MEMBERS
     if query.data == "cancel":
