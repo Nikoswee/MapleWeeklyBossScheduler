@@ -1031,6 +1031,8 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     run_id   = int(parts[2])
     accepted = 1 if action == "accept" else -1
 
+    log.info(f"RSVP: {update.effective_user.username} | action:{action} | run_id:{run_id}")
+
     run = db.get_run(run_id)
     if not run:
         await query.edit_message_text(f"⚠️ Run #{run_id} not found."); return
@@ -1038,15 +1040,23 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"⚠️ Run #{run_id} has been cancelled."); return
 
     user_chars = db.get_characters(update.effective_user.id)
-    matched    = None
+    log.info(f"RSVP: user has {len(user_chars)} characters")
+
+    matched = None
     for ch in user_chars:
         rm = db.get_run_member_by_char(run_id, ch["id"])
-        if rm: matched = (ch, rm); break
+        log.info(f"RSVP: checking char {ch['ign']} for run {run_id} → {rm}")
+        if rm:
+            matched = (ch, rm)
+            break
 
     if not matched:
-        await query.answer("⚠️ You're not invited to this run.", show_alert=True); return
+        await query.answer("⚠️ You're not invited to this run.", show_alert=True)
+        log.warning(f"RSVP: no match found for {update.effective_user.username} in run {run_id}")
+        return
 
-    ch, rm   = matched
+    ch, rm = matched
+    log.info(f"RSVP: matched char {ch['ign']} | current accepted={rm['accepted']}")
     db.set_member_response(run_id, ch["id"], accepted)
     members  = db.get_run_members(run_id)
     sgt      = get_run_dt(run) + timedelta(hours=8)
