@@ -265,6 +265,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*Scheduling*\n"
         "`/createrun` — create a run\n"
         "`/editrun <run_id>` — edit date/time or members\n"
+        "`/resendrun <run_id>` — resend invite to pending members\n"
         "`/cancelrun <run_id>`\n"
         "`/myruns` — your invitations\n"
         "`/runs` — all upcoming runs\n\n"
