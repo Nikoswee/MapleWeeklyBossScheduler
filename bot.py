@@ -789,6 +789,72 @@ async def _render_edit_calendar(query, ctx):
     )
     return EDIT_DATE
 
+async def cmd_resendrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Usage: `/resendrun <run_id>`", parse_mode="Markdown")
+        return
+    try:
+        run_id = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Run ID must be a number.", parse_mode="Markdown")
+        return
+
+    run = db.get_run(run_id)
+    if not run:
+        await update.message.reply_text(f"⚠️ Run #{run_id} not found.", parse_mode="Markdown")
+        return
+    if run["leader_id"] != update.effective_user.id:
+        await update.message.reply_text("⚠️ Only the run leader can resend invites.", parse_mode="Markdown")
+        return
+    if run["status"] == "cancelled":
+        await update.message.reply_text("⚠️ This run has been cancelled.", parse_mode="Markdown")
+        return
+
+    members = db.get_run_members(run_id)
+    pending = [m for m in members if m["accepted"] == 0]
+
+    if not pending:
+        await update.message.reply_text(
+            f"ℹ️ No pending members for Run #{run_id} — everyone has already responded.",
+            parse_mode="Markdown"
+        )
+        return
+
+    run_dt   = get_run_dt(run)
+    sgt      = run_dt + timedelta(hours=8)
+    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
+    leader   = update.effective_user.username or str(update.effective_user.id)
+
+    invite_text = (
+        f"📨 Reminder: You haven't responded to this boss run yet!\n\n"
+        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+        f"📅 {time_str}\n"
+        f"👑 Leader: @{leader}\n\n"
+        f"Please respond:"
+    )
+    invite_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Accept",  callback_data=f"rsvp_accept_{run_id}"),
+        InlineKeyboardButton("❌ Decline", callback_data=f"rsvp_decline_{run_id}"),
+    ]])
+
+    notified, failed = [], []
+    for m in pending:
+        try:
+            await ctx.bot.send_message(
+                chat_id=m["telegram_id"],
+                text=invite_text,
+                reply_markup=invite_kb
+            )
+            notified.append(m["ign"])
+        except Exception as e:
+            log.warning(f"Resend failed → {m['ign']} (id:{m['telegram_id']}): {e}")
+            failed.append(m["ign"])
+
+    summary = f"✅ Resent invite to {len(notified)} pending member(s): {', '.join(notified)}"
+    if failed:
+        summary += f"\n⚠️ Still couldn't DM: {', '.join(failed)}"
+    await update.message.reply_text(summary)
+
 async def edit_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not await _check_editor(query, ctx): return EDIT_DATE
@@ -1234,6 +1300,7 @@ def main():
     app.add_handler(CommandHandler("runs",       cmd_runs))
     app.add_handler(CommandHandler("chatid",     cmd_chatid))
     app.add_handler(CommandHandler("version",    cmd_version))
+    app.add_handler(CommandHandler("resendrun", cmd_resendrun))
 
     async def on_startup(app: Application):
         scheduler = AsyncIOScheduler(timezone="UTC")
