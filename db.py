@@ -1,11 +1,9 @@
 """
-db.py — PostgreSQL version
-Reads DATABASE_URL from environment (set automatically by Railway).
+db.py — PostgreSQL version for Railway
 """
 
 import os
 import psycopg2
-import psycopg2.extras
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
@@ -77,8 +75,8 @@ def init_db():
             UNIQUE(run_id, character_id)
         )
     """)
-    
-# Sync bosses — add new ones, don't delete old ones (runs may reference them)
+
+    # Sync bosses — only add new ones, never delete (runs may reference old IDs)
     for name, difficulties in BOSSES:
         for diff in difficulties:
             c.execute(
@@ -89,20 +87,19 @@ def init_db():
     conn.commit()
     conn.close()
 
-def _row_to_dict(cursor, row):
-    """Convert a psycopg2 row to a dict using cursor description."""
+def _row(cursor, row):
     if row is None:
         return None
     cols = [d[0] for d in cursor.description]
     return dict(zip(cols, row))
 
-def _rows_to_dicts(cursor, rows):
+def _rows(cursor, rows):
     cols = [d[0] for d in cursor.description]
-    return [dict(zip(cols, row)) for row in rows]
+    return [dict(zip(cols, r)) for r in rows]
 
 # ── Users & Characters ────────────────────────────────────────────────────────
 
-def upsert_user(telegram_id, username):F
+def upsert_user(telegram_id, username):
     conn = get_conn()
     c = conn.cursor()
     c.execute(
@@ -148,9 +145,9 @@ def get_characters(telegram_id):
         "SELECT * FROM characters WHERE telegram_id=%s ORDER BY ign",
         (telegram_id,)
     )
-    rows = _rows_to_dicts(c, c.fetchall())
+    result = _rows(c, c.fetchall())
     conn.close()
-    return rows
+    return result
 
 def get_all_characters():
     conn = get_conn()
@@ -160,9 +157,9 @@ def get_all_characters():
            JOIN users u ON u.telegram_id=ch.telegram_id
            ORDER BY ch.ign"""
     )
-    rows = _rows_to_dicts(c, c.fetchall())
+    result = _rows(c, c.fetchall())
     conn.close()
-    return rows
+    return result
 
 def get_character_by_ign(ign):
     conn = get_conn()
@@ -174,9 +171,9 @@ def get_character_by_ign(ign):
            WHERE LOWER(ch.ign)=LOWER(%s)""",
         (ign,)
     )
-    row = _row_to_dict(c, c.fetchone())
+    result = _row(c, c.fetchone())
     conn.close()
-    return row
+    return result
 
 def get_character_by_id(char_id):
     conn = get_conn()
@@ -187,9 +184,9 @@ def get_character_by_id(char_id):
            WHERE ch.id=%s""",
         (char_id,)
     )
-    row = _row_to_dict(c, c.fetchone())
+    result = _row(c, c.fetchone())
     conn.close()
-    return row
+    return result
 
 # ── Bosses ────────────────────────────────────────────────────────────────────
 
@@ -197,9 +194,9 @@ def get_all_bosses():
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT * FROM bosses ORDER BY name, difficulty")
-    rows = _rows_to_dicts(c, c.fetchall())
+    result = _rows(c, c.fetchall())
     conn.close()
-    return rows
+    return result
 
 def find_boss(name, difficulty):
     conn = get_conn()
@@ -208,9 +205,9 @@ def find_boss(name, difficulty):
         "SELECT * FROM bosses WHERE LOWER(name)=LOWER(%s) AND LOWER(difficulty)=LOWER(%s)",
         (name, difficulty)
     )
-    row = _row_to_dict(c, c.fetchone())
+    result = _row(c, c.fetchone())
     conn.close()
-    return row
+    return result
 
 # ── Runs ──────────────────────────────────────────────────────────────────────
 
@@ -274,9 +271,9 @@ def get_run(run_id):
            WHERE r.id=%s""",
         (run_id,)
     )
-    row = _row_to_dict(c, c.fetchone())
+    result = _row(c, c.fetchone())
     conn.close()
-    return row
+    return result
 
 def get_run_members(run_id):
     conn = get_conn()
@@ -291,9 +288,9 @@ def get_run_members(run_id):
            ORDER BY ch.ign""",
         (run_id,)
     )
-    rows = _rows_to_dicts(c, c.fetchall())
+    result = _rows(c, c.fetchall())
     conn.close()
-    return rows
+    return result
 
 def get_run_member_by_char(run_id, character_id):
     conn = get_conn()
@@ -302,9 +299,9 @@ def get_run_member_by_char(run_id, character_id):
         "SELECT * FROM run_members WHERE run_id=%s AND character_id=%s",
         (run_id, character_id)
     )
-    row = _row_to_dict(c, c.fetchone())
+    result = _row(c, c.fetchone())
     conn.close()
-    return row
+    return result
 
 def check_and_confirm_run(run_id):
     conn = get_conn()
@@ -341,9 +338,9 @@ def get_active_runs():
              AND r.run_at > NOW()
            ORDER BY r.run_at"""
     )
-    rows = _rows_to_dicts(c, c.fetchall())
+    result = _rows(c, c.fetchall())
     conn.close()
-    return rows
+    return result
 
 def get_user_runs(telegram_id):
     conn = get_conn()
@@ -362,12 +359,11 @@ def get_user_runs(telegram_id):
            ORDER BY r.run_at""",
         (telegram_id,)
     )
-    rows = _rows_to_dicts(c, c.fetchall())
+    result = _rows(c, c.fetchall())
     conn.close()
-    return rows
+    return result
 
 def get_runs_due_for_reminder():
-    """Confirmed runs whose remind_at is within the last 15 minutes."""
     conn = get_conn()
     c = conn.cursor()
     c.execute(
@@ -380,9 +376,9 @@ def get_runs_due_for_reminder():
              AND r.remind_at > NOW() - INTERVAL '15 minutes'
              AND r.run_at > NOW()"""
     )
-    rows = _rows_to_dicts(c, c.fetchall())
+    result = _rows(c, c.fetchall())
     conn.close()
-    return rows
+    return result
 
 def get_expired_pending_runs(hours=12):
     conn = get_conn()
@@ -395,6 +391,6 @@ def get_expired_pending_runs(hours=12):
              AND r.created_at <= NOW() - INTERVAL '%s hours'""",
         (hours,)
     )
-    rows = _rows_to_dicts(c, c.fetchall())
+    result = _rows(c, c.fetchall())
     conn.close()
-    return rows
+    return result
