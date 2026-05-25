@@ -153,10 +153,10 @@ def build_minute_picker(cur=0):
 
 def build_reminder_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏰ 1 hour before",  callback_data="reminder:60")],
-        [InlineKeyboardButton("⏰ 30 mins before", callback_data="reminder:30")],
-        [InlineKeyboardButton("⏰ 15 mins before", callback_data="reminder:15")],
-        [InlineKeyboardButton("🚫 No reminder",    callback_data="reminder:0")],
+        [InlineKeyboardButton("⏰ 1 hour before",  callback_data="reminder_60")],
+        [InlineKeyboardButton("⏰ 30 mins before", callback_data="reminder_30")],
+        [InlineKeyboardButton("⏰ 15 mins before", callback_data="reminder_15")],
+        [InlineKeyboardButton("🚫 No reminder",    callback_data="reminder_0")],
         [InlineKeyboardButton("❌ Cancel",          callback_data="cancel")],
     ])
 
@@ -518,7 +518,7 @@ async def step_select_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear()
         return ConversationHandler.END
-    ctx.user_data["reminder_minutes"] = int(query.data.split(":")[1])
+    ctx.user_data["reminder_minutes"] = int(query.data.replace("reminder_", ""))
     return await _render_confirmation(query, ctx)
 
 # ── Confirmation ──────────────────────────────────────────────────────────────
@@ -947,7 +947,7 @@ def main():
             SELECT_HOUR:    [CallbackQueryHandler(step_select_hour,     pattern=r"^hour:")],
             SELECT_MINUTE:  [CallbackQueryHandler(step_select_minute,   pattern=r"^min:")],
             SELECT_REMINDER:[
-                CallbackQueryHandler(step_select_reminder, pattern=r"^reminder:"),
+                CallbackQueryHandler(step_select_reminder, pattern=r"^reminder_"),
                 CallbackQueryHandler(step_select_reminder, pattern=r"^cancel$"),
             ],
             CONFIRM_RUN:    [CallbackQueryHandler(step_confirm_run)],
