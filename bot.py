@@ -257,6 +257,7 @@ async def cmd_bosses(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def createrun_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.upsert_user(update.effective_user.id, update.effective_user.username or "")
     ctx.user_data.clear()
+    ctx.user_data["creator_id"] = update.effective_user.id 
     bosses  = db.get_all_bosses()
     grouped = {}
     for b in bosses:
@@ -274,10 +275,19 @@ async def createrun_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return SELECT_BOSS
 
+async def _check_creator(query, ctx) -> bool:
+    """Returns True if the person tapping is the run creator."""
+    if query.from_user.id != ctx.user_data.get("creator_id"):
+        await query.answer("⚠️ Only the run creator can use these buttons.", show_alert=True)
+        return False
+    return True
+
 # ── Step 2: Difficulty ────────────────────────────────────────────────────────
 
 async def step_select_boss(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not await _check_creator(query, ctx):
+        return SELECT_BOSS
     await query.answer()
     if query.data == "cancel":
         await query.edit_message_text("❌ Run creation cancelled.")
@@ -301,6 +311,8 @@ async def step_select_boss(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def step_select_diff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not await _check_creator(query, ctx):
+        return SELECT_DIFF
     await query.answer()
     if query.data == "cancel":
         await query.edit_message_text("❌ Run creation cancelled.")
@@ -336,6 +348,9 @@ async def _render_member_picker(query, ctx):
 
 async def step_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+        query = update.callback_query
+    if not await _check_creator(query, ctx):
+        return SELECT_MEMBERS
     if query.data == "cancel":
         await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
@@ -378,6 +393,8 @@ async def _render_calendar(query, ctx):
 
 async def step_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not await _check_creator(query, ctx):
+        return SELECT_DATE
     await query.answer()
     if query.data == "cancel":
         await query.edit_message_text("❌ Run creation cancelled.")
@@ -422,6 +439,8 @@ async def _render_hour_picker(query, ctx):
 
 async def step_select_hour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not await _check_creator(query, ctx):
+        return SELECT_HOUR
     await query.answer()
     if query.data == "cancel":
         await query.edit_message_text("❌ Run creation cancelled.")
@@ -450,6 +469,8 @@ async def _render_minute_picker(query, ctx):
 
 async def step_select_minute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not await _check_creator(query, ctx):
+        return SELECT_MINUTE
     if query.data == "cancel":
         await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
@@ -484,6 +505,9 @@ async def _render_reminder_picker(query, ctx):
 
 async def step_select_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+
+    if not await _check_creator(query, ctx):
+        return SELECT_REMINDER
     await query.answer()
     if query.data == "cancel":
         await query.edit_message_text("❌ Run creation cancelled.")
@@ -535,6 +559,8 @@ async def _render_confirmation(query, ctx):
 
 async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not await _check_creator(query, ctx):
+        return CONFIRM_RUN
     await query.answer()
     if query.data == "cancel":
         await query.edit_message_text("❌ Run creation cancelled.")
@@ -927,7 +953,7 @@ def main():
             SELECT_DATE:    [CallbackQueryHandler(step_select_date,     pattern=r"^cal:")],
             SELECT_HOUR:    [CallbackQueryHandler(step_select_hour,     pattern=r"^hour:")],
             SELECT_MINUTE:  [CallbackQueryHandler(step_select_minute,   pattern=r"^min:")],
-            SELECT_REMINDER:[CallbackQueryHandler(step_select_reminder, pattern=r"^reminder:")],
+            SELECT_REMINDER: [CallbackQueryHandler(step_select_reminder, pattern=r"^reminder:"),CallbackQueryHandler(step_select_reminder, pattern=r"^cancel$")],
             CONFIRM_RUN:    [CallbackQueryHandler(step_confirm_run)],
         },
         fallbacks=[
