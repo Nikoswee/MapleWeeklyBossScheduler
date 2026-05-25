@@ -663,6 +663,8 @@ async def _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute
         try:
             await ctx.bot.send_message(
                 chat_id=GROUP_CHAT_ID,
+                message_thread_id=GROUP_THREAD_ID,
+                is_topic_message=bool(GROUP_THREAD_ID),
                 text=(
                     f"📢 {verb_g} Boss Run\n\n"
                     f"⚔️ {diff_icon(difficulty)} {boss_name} {difficulty}\n"
