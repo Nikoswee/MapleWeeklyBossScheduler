@@ -22,7 +22,8 @@ import db
 # ── Config ────────────────────────────────────────────────────────────────────
 
 BOT_TOKEN     = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", None)
+GROUP_CHAT_ID   = os.environ.get("GROUP_CHAT_ID", None)
+GROUP_THREAD_ID = int(os.environ.get("GROUP_THREAD_ID", 0)) or None
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -1003,7 +1004,7 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 log.warning(f"Leader confirm notify failed: {e}")
             if GROUP_CHAT_ID:
                 try:
-                    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=confirm_msg)
+                    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, text=confirm_msg)
                 except Exception as e:
                     log.warning(f"Group confirm failed: {e}")
         else:
@@ -1053,7 +1054,7 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Notify group
         if GROUP_CHAT_ID:
             try:
-                await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=cancel_msg)
+                await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, text=cancel_msg)
             except Exception as e:
                 log.warning(f"Group decline cancel notify failed: {e}")
         log.info(f"Run #{run_id} auto-cancelled due to decline by {ch['ign']}")
@@ -1107,9 +1108,13 @@ async def cmd_runs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── /chatid & /version ────────────────────────────────────────────────────────
 
 async def cmd_chatid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
+    chat      = update.effective_chat
+    thread_id = update.message.message_thread_id
     await update.message.reply_text(
-        f"Chat ID: {chat.id}\nType: {chat.type}\nTitle: {getattr(chat, 'title', 'N/A')}"
+        f"Chat ID: {chat.id}\n"
+        f"Thread ID: {thread_id}\n"
+        f"Type: {chat.type}\n"
+        f"Title: {getattr(chat, 'title', 'N/A')}"
     )
 
 async def cmd_version(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1146,7 +1151,7 @@ async def send_reminders(app: Application):
                 log.warning(f"Reminder failed {m['ign']}: {e}")
         if GROUP_CHAT_ID:
             try:
-                await app.bot.send_message(chat_id=GROUP_CHAT_ID, text=msg)
+                await app.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, text=msg)
             except Exception as e:
                 log.warning(f"Group reminder failed: {e}")
 
