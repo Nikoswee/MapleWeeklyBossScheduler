@@ -21,7 +21,7 @@ import db
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-BOT_TOKEN     = os.environ.get("BOT_TOKEN", "8725860341:AAFtHulRR8qalhZHi0awLPzbn97d1KMuXZE")
+BOT_TOKEN     = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", None)
 
 logging.basicConfig(
@@ -51,8 +51,8 @@ def diff_icon(diff):
     return DIFF_EMOJI.get(diff.lower(), "⚪")
 
 def fmt_run(run, members=None):
-    icon     = diff_icon(run["difficulty"])
-    run_dt   = run["run_at"]
+    icon   = diff_icon(run["difficulty"])
+    run_dt = run["run_at"]
     if isinstance(run_dt, str):
         run_dt = datetime.fromisoformat(run_dt)
     if run_dt.tzinfo is None:
@@ -75,6 +75,22 @@ def fmt_run(run, members=None):
             if m["username"]: line += f" (@{m['username']})"
             lines.append(line)
     return "\n".join(lines)
+
+def get_run_dt(run):
+    run_dt = run["run_at"]
+    if isinstance(run_dt, str):
+        run_dt = datetime.fromisoformat(run_dt)
+    if run_dt.tzinfo is None:
+        run_dt = run_dt.replace(tzinfo=timezone.utc)
+    return run_dt
+
+# ── Creator ownership check ───────────────────────────────────────────────────
+
+async def _check_creator(query, ctx) -> bool:
+    if query.from_user.id != ctx.user_data.get("creator_id"):
+        await query.answer("⚠️ Only the run creator can use these buttons.", show_alert=True)
+        return False
+    return True
 
 # ── Calendar / time pickers ───────────────────────────────────────────────────
 
@@ -122,10 +138,10 @@ def build_minute_picker(cur=0):
         InlineKeyboardButton(f"[:{m:02d}]" if m == cur else f":{m:02d}", callback_data=f"min:{m}")
         for m in quick
     ]
-    row2  = [
-        InlineKeyboardButton("−5",       callback_data=f"min:{(cur - 5) % 60}"),
+    row2 = [
+        InlineKeyboardButton("−5",           callback_data=f"min:{(cur - 5) % 60}"),
         InlineKeyboardButton(f"  :{cur:02d}  ", callback_data="min:noop"),
-        InlineKeyboardButton("+5",       callback_data=f"min:{(cur + 5) % 60}"),
+        InlineKeyboardButton("+5",           callback_data=f"min:{(cur + 5) % 60}"),
     ]
     return InlineKeyboardMarkup([
         row1, row2,
@@ -247,9 +263,9 @@ async def cmd_bosses(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         grouped.setdefault(b["name"], []).append(b["difficulty"])
     lines = ["⚔️ *Available Bosses*\n"]
     for name, diffs in grouped.items():
-        icons = "  ".join(f"{diff_icon(d)}{d}" for d in diffs)
-        lines.append(f"*{name}*\n  {icons}")
-    lines.append("\n🟢Easy 🔵Normal 🟠Hard 🔴Chaos ⚫Extreme")
+        icons = "  ".join(f"{diff_icon(d)} {d}" for d in diffs)
+        lines.append(f"*{name}*\n  {icons}\n")
+    lines.append("🟢Easy 🔵Normal 🟠Hard 🔴Chaos ⚫Extreme")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 # ── /createrun — Step 1: Boss ─────────────────────────────────────────────────
@@ -257,12 +273,14 @@ async def cmd_bosses(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def createrun_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.upsert_user(update.effective_user.id, update.effective_user.username or "")
     ctx.user_data.clear()
-    ctx.user_data["creator_id"] = update.effective_user.id 
+    ctx.user_data["creator_id"] = update.effective_user.id
+
     bosses  = db.get_all_bosses()
     grouped = {}
     for b in bosses:
         grouped.setdefault(b["name"], []).append(b["difficulty"])
     ctx.user_data["boss_map"] = grouped
+
     keyboard = [
         [InlineKeyboardButton(name, callback_data=f"boss:{name}")]
         for name in grouped
@@ -274,13 +292,6 @@ async def createrun_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
     return SELECT_BOSS
-
-async def _check_creator(query, ctx) -> bool:
-    """Returns True if the person tapping is the run creator."""
-    if query.from_user.id != ctx.user_data.get("creator_id"):
-        await query.answer("⚠️ Only the run creator can use these buttons.", show_alert=True)
-        return False
-    return True
 
 # ── Step 2: Difficulty ────────────────────────────────────────────────────────
 
@@ -294,8 +305,8 @@ async def step_select_boss(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     boss_name = query.data.split(":", 1)[1]
     ctx.user_data["boss_name"] = boss_name
-    diffs     = ctx.user_data["boss_map"][boss_name]
-    keyboard  = [
+    diffs    = ctx.user_data["boss_map"][boss_name]
+    keyboard = [
         [InlineKeyboardButton(f"{diff_icon(d)} {d}", callback_data=f"diff:{d}")]
         for d in diffs
     ]
@@ -409,7 +420,7 @@ async def step_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if month < 1:  month = 12; year -= 1
         else:
             month += 1
-            if month > 12: month = 1;  year += 1
+            if month > 12: month = 1; year += 1
         ctx.user_data["cal_year"]  = year
         ctx.user_data["cal_month"] = month
         return await _render_calendar(query, ctx)
@@ -470,10 +481,6 @@ async def step_select_minute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not await _check_creator(query, ctx):
         return SELECT_MINUTE
-    if query.data == "cancel":
-        await query.answer()
-        await query.edit_message_text("❌ Run creation cancelled.")
-        return ConversationHandler.END
     if query.data == "min:noop":
         await query.answer()
         return SELECT_MINUTE
@@ -504,12 +511,12 @@ async def _render_reminder_picker(query, ctx):
 
 async def step_select_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-
     if not await _check_creator(query, ctx):
         return SELECT_REMINDER
     await query.answer()
     if query.data == "cancel":
         await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear()
         return ConversationHandler.END
     ctx.user_data["reminder_minutes"] = int(query.data.split(":")[1])
     return await _render_confirmation(query, ctx)
@@ -530,6 +537,7 @@ async def _render_confirmation(query, ctx):
             "⚠️ That date/time is in the past. Use `/createrun` to start over.",
             parse_mode="Markdown"
         )
+        ctx.user_data.clear()
         return ConversationHandler.END
 
     ctx.user_data["run_at_iso"] = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -579,7 +587,6 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for char_id in selected:
         db.add_run_member(run_id, char_id)
 
-    # Save reminder time
     if reminder_mins > 0:
         sgt_dt    = datetime(y, mo, d, hour, minute, tzinfo=timezone(timedelta(hours=8)))
         remind_dt = sgt_dt - timedelta(minutes=reminder_mins)
@@ -697,15 +704,10 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer("⚠️ You're not invited to this run.", show_alert=True)
         return
 
-    ch, rm = matched
+    ch, rm   = matched
     db.set_member_response(run_id, ch["id"], accepted)
     members  = db.get_run_members(run_id)
-
-    run_dt = run["run_at"]
-    if isinstance(run_dt, str):
-        run_dt = datetime.fromisoformat(run_dt)
-    if run_dt.tzinfo is None:
-        run_dt = run_dt.replace(tzinfo=timezone.utc)
+    run_dt   = get_run_dt(run)
     sgt      = run_dt + timedelta(hours=8)
     time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
 
@@ -864,11 +866,7 @@ async def send_reminders(app: Application):
     runs = db.get_runs_due_for_reminder()
     for run in runs:
         members  = db.get_run_members(run["id"])
-        run_dt   = run["run_at"]
-        if isinstance(run_dt, str):
-            run_dt = datetime.fromisoformat(run_dt)
-        if run_dt.tzinfo is None:
-            run_dt = run_dt.replace(tzinfo=timezone.utc)
+        run_dt   = get_run_dt(run)
         sgt      = run_dt + timedelta(hours=8)
         time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
         msg = (
@@ -896,12 +894,8 @@ async def auto_cancel_pending_runs(app: Application):
     expired = db.get_expired_pending_runs(hours=12)
     for run in expired:
         db.cancel_run(run["id"])
-        members = db.get_run_members(run["id"])
-        run_dt  = run["run_at"]
-        if isinstance(run_dt, str):
-            run_dt = datetime.fromisoformat(run_dt)
-        if run_dt.tzinfo is None:
-            run_dt = run_dt.replace(tzinfo=timezone.utc)
+        members  = db.get_run_members(run["id"])
+        run_dt   = get_run_dt(run)
         sgt      = run_dt + timedelta(hours=8)
         time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
         pending  = [m for m in members if m["accepted"] == 0]
@@ -952,7 +946,10 @@ def main():
             SELECT_DATE:    [CallbackQueryHandler(step_select_date,     pattern=r"^cal:")],
             SELECT_HOUR:    [CallbackQueryHandler(step_select_hour,     pattern=r"^hour:")],
             SELECT_MINUTE:  [CallbackQueryHandler(step_select_minute,   pattern=r"^min:")],
-            SELECT_REMINDER: [CallbackQueryHandler(step_select_reminder, pattern=r"^reminder:"),CallbackQueryHandler(step_select_reminder, pattern=r"^cancel$")],
+            SELECT_REMINDER:[
+                CallbackQueryHandler(step_select_reminder, pattern=r"^reminder:"),
+                CallbackQueryHandler(step_select_reminder, pattern=r"^cancel$"),
+            ],
             CONFIRM_RUN:    [CallbackQueryHandler(step_confirm_run)],
         },
         fallbacks=[
@@ -980,12 +977,10 @@ def main():
 
     async def on_startup(app: Application):
         scheduler = AsyncIOScheduler(timezone="UTC")
-        # Reminders — check every 15 mins
         scheduler.add_job(
             lambda: asyncio.ensure_future(send_reminders(app)),
             CronTrigger(minute="0,15,30,45")
         )
-        # Auto-cancel pending runs — check every hour
         scheduler.add_job(
             lambda: asyncio.ensure_future(auto_cancel_pending_runs(app)),
             CronTrigger(minute=0)
