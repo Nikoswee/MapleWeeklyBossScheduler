@@ -85,19 +85,28 @@ def fmt_run(run, members=None):
     icon     = diff_icon(run["difficulty"])
     sgt      = get_run_dt(run) + timedelta(hours=8)
     time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
+    status   = f"*{run['status'].upper()}*"
     lines = [
         f"⚔️ #{run['id']} · {run['boss_name']} {run['difficulty']} {icon}",
         f"📅 {time_str}",
         f"👑 @{run['leader_username']}",
-        f"📋 {run['status'].upper()}",
+        f"📋 {status}",
     ]
     if members:
-        party = " · ".join(
-            f"{['❌','⏳','✅'][m['accepted']+1]} {m['ign']}"
-            + (f" (@{m['username']})" if m["username"] else "")
-            for m in members
-        )
-        lines.append(f"👥 {party}")
+        total    = len(members)
+        accepted = sum(1 for m in members if m["accepted"] == 1)
+        pending  = [m for m in members if m["accepted"] == 0]
+        declined = [m for m in members if m["accepted"] == -1]
+        party    = f"👥 {accepted}/{total} accepted"
+        waiting  = pending + declined
+        if waiting:
+            names = ", ".join(
+                m["ign"] + (f" (@{m['username']})" if m["username"] else "")
+                for m in waiting
+            )
+            label = "Pending" if not declined else "Pending/Declined"
+            party += f" · {label}: {names}"
+        lines.append(party)
     return "\n".join(lines)
 
 def fmt_runs_grouped(runs):
@@ -1080,14 +1089,14 @@ async def cmd_myruns(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = fmt_runs_grouped(runs)
     if not text.strip():
         await update.message.reply_text("No upcoming runs."); return
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def cmd_runs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     runs = db.get_active_runs()
     if not runs:
         await update.message.reply_text("No upcoming runs scheduled."); return
     text = fmt_runs_grouped(runs)
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 # ── /chatid & /version ────────────────────────────────────────────────────────
 
@@ -1099,12 +1108,12 @@ async def cmd_chatid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_version(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     import subprocess
+    sgt = datetime.now(timezone(timedelta(hours=8)))
     try:
         commit = subprocess.check_output(["git", "log", "-1", "--format=%h %ci"], text=True).strip()
-        await update.message.reply_text(f"🤖 Version: `{commit}`", parse_mode="Markdown")
+        await update.message.reply_text(f"🤖 Version: {commit} (checked {sgt.strftime('%Y-%m-%d %H:%M SGT')})")
     except Exception:
-        build_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        await update.message.reply_text(f"🤖 Started: `{build_time}`", parse_mode="Markdown")
+        await update.message.reply_text(f"🤖 Started: {sgt.strftime('%Y-%m-%d %H:%M SGT')}")
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 
