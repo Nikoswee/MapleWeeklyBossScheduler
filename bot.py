@@ -1004,7 +1004,7 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 log.warning(f"Leader confirm notify failed: {e}")
             if GROUP_CHAT_ID:
                 try:
-                    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, text=confirm_msg)
+                    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, is_topic_message=bool(GROUP_THREAD_ID), text=confirm_msg)
                 except Exception as e:
                     log.warning(f"Group confirm failed: {e}")
         else:
@@ -1054,7 +1054,7 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Notify group
         if GROUP_CHAT_ID:
             try:
-                await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, text=cancel_msg)
+                await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, is_topic_message=bool(GROUP_THREAD_ID), text=cancel_msg)
             except Exception as e:
                 log.warning(f"Group decline cancel notify failed: {e}")
         log.info(f"Run #{run_id} auto-cancelled due to decline by {ch['ign']}")
@@ -1151,7 +1151,7 @@ async def send_reminders(app: Application):
                 log.warning(f"Reminder failed {m['ign']}: {e}")
         if GROUP_CHAT_ID:
             try:
-                await app.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, text=msg)
+                await app.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, is_topic_message=bool(GROUP_THREAD_ID), text=msg)
             except Exception as e:
                 log.warning(f"Group reminder failed: {e}")
 
