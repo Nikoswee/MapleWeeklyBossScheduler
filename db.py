@@ -394,3 +394,30 @@ def get_expired_pending_runs(hours=12):
     result = _rows(c, c.fetchall())
     conn.close()
     return result
+
+def update_run_time(run_id, run_at_iso):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE runs SET run_at=%s, remind_at=NULL, status='pending' WHERE id=%s",
+        (run_at_iso, run_id)
+    )
+    conn.commit()
+    conn.close()
+
+def reset_run_members(run_id, new_char_ids):
+    """Replace all members of a run and reset acceptances."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM run_members WHERE run_id=%s", (run_id,))
+    for char_id in new_char_ids:
+        try:
+            c.execute(
+                "INSERT INTO run_members (run_id, character_id) VALUES (%s,%s)",
+                (run_id, char_id)
+            )
+        except Exception:
+            pass
+    c.execute("UPDATE runs SET status='pending' WHERE id=%s", (run_id,))
+    conn.commit()
+    conn.close()
