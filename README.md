@@ -1,4 +1,4 @@
-# 🍄 MapleStory Guild Boss Scheduler — Telegram Bot
+# 🍄 MapleStory Telegram Boss Scheduler — Telegram Bot
 
 A Telegram bot for scheduling MapleStory boss runs with your guild. Create runs, invite party members, track acceptances, and get reminders — all through inline buttons.
 
