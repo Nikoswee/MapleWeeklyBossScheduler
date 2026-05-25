@@ -43,6 +43,14 @@ log = logging.getLogger(__name__)
     CONFIRM_RUN,
 ) = range(8)
 
+# Reminder options — simple short keys, no colons
+REMINDER_OPTIONS = {
+    "r60": (60, "1 hour before"),
+    "r30": (30, "30 mins before"),
+    "r15": (15, "15 mins before"),
+    "r0":  (0,  "No reminder"),
+}
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 DIFF_EMOJI = {"easy": "🟢", "normal": "🔵", "hard": "🟠", "chaos": "🔴", "extreme": "⚫"}
@@ -50,14 +58,17 @@ DIFF_EMOJI = {"easy": "🟢", "normal": "🔵", "hard": "🟠", "chaos": "🔴",
 def diff_icon(diff):
     return DIFF_EMOJI.get(diff.lower(), "⚪")
 
-def fmt_run(run, members=None):
-    icon   = diff_icon(run["difficulty"])
+def get_run_dt(run):
     run_dt = run["run_at"]
     if isinstance(run_dt, str):
         run_dt = datetime.fromisoformat(run_dt)
     if run_dt.tzinfo is None:
         run_dt = run_dt.replace(tzinfo=timezone.utc)
-    sgt      = run_dt + timedelta(hours=8)
+    return run_dt
+
+def fmt_run(run, members=None):
+    icon     = diff_icon(run["difficulty"])
+    sgt      = get_run_dt(run) + timedelta(hours=8)
     time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
     lines = [
         f"⚔️ *Run #{run['id']}* — {icon} {run['boss_name']} {run['difficulty']}",
@@ -76,49 +87,50 @@ def fmt_run(run, members=None):
             lines.append(line)
     return "\n".join(lines)
 
-def get_run_dt(run):
-    run_dt = run["run_at"]
-    if isinstance(run_dt, str):
-        run_dt = datetime.fromisoformat(run_dt)
-    if run_dt.tzinfo is None:
-        run_dt = run_dt.replace(tzinfo=timezone.utc)
-    return run_dt
-
 # ── Creator ownership check ───────────────────────────────────────────────────
 
 async def _check_creator(query, ctx) -> bool:
+    if not ctx.user_data.get("creator_id"):
+        await query.answer(
+            "⚠️ Session expired. Please use /createrun to start again.",
+            show_alert=True
+        )
+        return False
     if query.from_user.id != ctx.user_data.get("creator_id"):
-        await query.answer("⚠️ Only the run creator can use these buttons.", show_alert=True)
+        await query.answer(
+            "⚠️ Only the run creator can use these buttons.",
+            show_alert=True
+        )
         return False
     return True
 
-# ── Calendar / time pickers ───────────────────────────────────────────────────
+# ── Keyboards ─────────────────────────────────────────────────────────────────
 
 def build_calendar(year, month):
     now      = datetime.now(timezone(timedelta(hours=8)))
     keyboard = []
     keyboard.append([
-        InlineKeyboardButton("◀", callback_data=f"cal:prev:{year}:{month}"),
-        InlineKeyboardButton(f"{calendar.month_name[month]} {year}", callback_data="cal:noop"),
-        InlineKeyboardButton("▶", callback_data=f"cal:next:{year}:{month}"),
+        InlineKeyboardButton("◀", callback_data=f"cal_prev_{year}_{month}"),
+        InlineKeyboardButton(f"{calendar.month_name[month]} {year}", callback_data="cal_noop"),
+        InlineKeyboardButton("▶", callback_data=f"cal_next_{year}_{month}"),
     ])
     keyboard.append([
-        InlineKeyboardButton(d, callback_data="cal:noop")
+        InlineKeyboardButton(d, callback_data="cal_noop")
         for d in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
     ])
     for week in calendar.monthcalendar(year, month):
         row = []
         for day in week:
             if day == 0:
-                row.append(InlineKeyboardButton(" ", callback_data="cal:noop"))
+                row.append(InlineKeyboardButton(" ", callback_data="cal_noop"))
             else:
                 dt   = datetime(year, month, day, tzinfo=timezone(timedelta(hours=8)))
                 past = dt.date() < now.date()
                 label = f"{day}" if past else f"✦{day}"
-                cb    = "cal:noop" if past else f"cal:day:{year}:{month}:{day}"
+                cb    = "cal_noop" if past else f"cal_day_{year}_{month}_{day}"
                 row.append(InlineKeyboardButton(label, callback_data=cb))
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
     return InlineKeyboardMarkup(keyboard)
 
 def build_hour_picker(selected=None):
@@ -127,37 +139,37 @@ def build_hour_picker(selected=None):
         row = []
         for h in range(i, i + 6):
             label = f"[{h:02d}]" if h == selected else f"{h:02d}"
-            row.append(InlineKeyboardButton(label, callback_data=f"hour:{h}"))
+            row.append(InlineKeyboardButton(label, callback_data=f"hr_{h}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
     return InlineKeyboardMarkup(rows)
 
 def build_minute_picker(cur=0):
     quick = [0, 15, 30, 45]
     row1  = [
-        InlineKeyboardButton(f"[:{m:02d}]" if m == cur else f":{m:02d}", callback_data=f"min:{m}")
+        InlineKeyboardButton(f"[:{m:02d}]" if m == cur else f":{m:02d}", callback_data=f"mn_{m}")
         for m in quick
     ]
     row2 = [
-        InlineKeyboardButton("−5",           callback_data=f"min:{(cur - 5) % 60}"),
-        InlineKeyboardButton(f"  :{cur:02d}  ", callback_data="min:noop"),
-        InlineKeyboardButton("+5",           callback_data=f"min:{(cur + 5) % 60}"),
+        InlineKeyboardButton("−5",            callback_data=f"mn_{(cur - 5) % 60}"),
+        InlineKeyboardButton(f"  :{cur:02d}  ", callback_data="mn_noop"),
+        InlineKeyboardButton("+5",            callback_data=f"mn_{(cur + 5) % 60}"),
     ]
     return InlineKeyboardMarkup([
         row1, row2,
         [
-            InlineKeyboardButton("✔️ Confirm time", callback_data=f"min:done:{cur}"),
-            InlineKeyboardButton("❌ Cancel",        callback_data="cancel"),
+            InlineKeyboardButton("✔️ Confirm time", callback_data=f"mn_done_{cur}"),
+            InlineKeyboardButton("❌ Cancel",        callback_data="cx"),
         ]
     ])
 
 def build_reminder_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏰ 1 hour before",  callback_data="reminder_60")],
-        [InlineKeyboardButton("⏰ 30 mins before", callback_data="reminder_30")],
-        [InlineKeyboardButton("⏰ 15 mins before", callback_data="reminder_15")],
-        [InlineKeyboardButton("🚫 No reminder",    callback_data="reminder_0")],
-        [InlineKeyboardButton("❌ Cancel",          callback_data="cancel")],
+        [InlineKeyboardButton("⏰ 1 hour before",  callback_data="r60")],
+        [InlineKeyboardButton("⏰ 30 mins before", callback_data="r30")],
+        [InlineKeyboardButton("⏰ 15 mins before", callback_data="r15")],
+        [InlineKeyboardButton("🚫 No reminder",    callback_data="r0")],
+        [InlineKeyboardButton("❌ Cancel",          callback_data="cx")],
     ])
 
 # ── /start & /help ────────────────────────────────────────────────────────────
@@ -282,10 +294,11 @@ async def createrun_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["boss_map"] = grouped
 
     keyboard = [
-        [InlineKeyboardButton(name, callback_data=f"boss:{name}")]
-        for name in grouped
+        [InlineKeyboardButton(name, callback_data=f"boss_{i}")]
+        for i, name in enumerate(grouped)
     ]
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+    ctx.user_data["boss_list"] = list(grouped.keys())
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
     await update.message.reply_text(
         "⚔️ *Create a Boss Run*\n\n*Step 1 of 6* — Which boss?",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -300,17 +313,20 @@ async def step_select_boss(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx):
         return SELECT_BOSS
     await query.answer()
-    if query.data == "cancel":
+    if query.data == "cx":
         await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear()
         return ConversationHandler.END
-    boss_name = query.data.split(":", 1)[1]
+    idx       = int(query.data.split("_")[1])
+    boss_name = ctx.user_data["boss_list"][idx]
     ctx.user_data["boss_name"] = boss_name
-    diffs    = ctx.user_data["boss_map"][boss_name]
-    keyboard = [
-        [InlineKeyboardButton(f"{diff_icon(d)} {d}", callback_data=f"diff:{d}")]
-        for d in diffs
+    diffs     = ctx.user_data["boss_map"][boss_name]
+    ctx.user_data["diff_list"] = diffs
+    keyboard  = [
+        [InlineKeyboardButton(f"{diff_icon(d)} {d}", callback_data=f"diff_{i}")]
+        for i, d in enumerate(diffs)
     ]
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
     await query.edit_message_text(
         f"⚔️ *Create a Boss Run*\n\nBoss: *{boss_name}*\n\n*Step 2 of 6* — Difficulty?",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -325,28 +341,37 @@ async def step_select_diff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx):
         return SELECT_DIFF
     await query.answer()
-    if query.data == "cancel":
+    if query.data == "cx":
         await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear()
         return ConversationHandler.END
-    ctx.user_data["difficulty"]     = query.data.split(":", 1)[1]
+    idx = int(query.data.split("_")[1])
+    ctx.user_data["difficulty"]     = ctx.user_data["diff_list"][idx]
     ctx.user_data["selected_chars"] = []
     return await _render_member_picker(query, ctx)
 
 async def _render_member_picker(query, ctx):
     all_chars  = db.get_all_characters()
+    ctx.user_data["char_list"] = [ch["id"] for ch in all_chars]
     selected   = ctx.user_data.get("selected_chars", [])
     boss_name  = ctx.user_data["boss_name"]
     difficulty = ctx.user_data["difficulty"]
-    keyboard   = []
-    for ch in all_chars:
+
+    # 2-column grid
+    buttons = []
+    for i, ch in enumerate(all_chars):
         tick  = "✅" if ch["id"] in selected else "⬜"
         label = f"{tick} {ch['ign']}"
-        if ch["class"]: label += f" ({ch['class']})"
-        if ch["level"]: label += f" Lv.{ch['level']}"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"tog:{ch['id']}")])
+        if ch["level"]: label += f" {ch['level']}"
+        buttons.append(InlineKeyboardButton(label, callback_data=f"tog_{i}"))
+
+    keyboard = []
+    for i in range(0, len(buttons), 2):
+        keyboard.append(buttons[i:i+2])
+
     keyboard.append([
-        InlineKeyboardButton(f"✔️ Done ({len(selected)} selected)", callback_data="members_done"),
-        InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
+        InlineKeyboardButton(f"✔️ Done ({len(selected)})", callback_data="members_done"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cx"),
     ])
     await query.edit_message_text(
         f"⚔️ *Create a Boss Run*\n\n"
@@ -361,9 +386,10 @@ async def step_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not await _check_creator(query, ctx):
         return SELECT_MEMBERS
-    if query.data == "cancel":
+    if query.data == "cx":
         await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear()
         return ConversationHandler.END
     if query.data == "members_done":
         if not ctx.user_data.get("selected_chars"):
@@ -372,7 +398,8 @@ async def step_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return await _render_calendar(query, ctx)
     await query.answer()
-    char_id  = int(query.data.split(":", 1)[1])
+    idx      = int(query.data.split("_")[1])
+    char_id  = ctx.user_data["char_list"][idx]
     selected = ctx.user_data.get("selected_chars", [])
     if char_id in selected:
         selected.remove(char_id)
@@ -406,12 +433,13 @@ async def step_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx):
         return SELECT_DATE
     await query.answer()
-    if query.data == "cancel":
+    if query.data == "cx":
         await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear()
         return ConversationHandler.END
-    parts = query.data.split(":")
-    if parts[1] == "noop":
+    if query.data == "cal_noop":
         return SELECT_DATE
+    parts = query.data.split("_")
     if parts[1] in ("prev", "next"):
         year  = int(parts[2])
         month = int(parts[3])
@@ -420,7 +448,7 @@ async def step_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if month < 1:  month = 12; year -= 1
         else:
             month += 1
-            if month > 12: month = 1; year += 1
+            if month > 12: month = 1;  year += 1
         ctx.user_data["cal_year"]  = year
         ctx.user_data["cal_month"] = month
         return await _render_calendar(query, ctx)
@@ -452,10 +480,11 @@ async def step_select_hour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx):
         return SELECT_HOUR
     await query.answer()
-    if query.data == "cancel":
+    if query.data == "cx":
         await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear()
         return ConversationHandler.END
-    ctx.user_data["run_hour"]   = int(query.data.split(":")[1])
+    ctx.user_data["run_hour"]   = int(query.data.split("_")[1])
     ctx.user_data["run_minute"] = ctx.user_data.get("run_minute", 0)
     return await _render_minute_picker(query, ctx)
 
@@ -481,11 +510,15 @@ async def step_select_minute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not await _check_creator(query, ctx):
         return SELECT_MINUTE
-    if query.data == "min:noop":
+    if query.data == "mn_noop":
         await query.answer()
         return SELECT_MINUTE
     await query.answer()
-    parts = query.data.split(":")
+    if query.data == "cx":
+        await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear()
+        return ConversationHandler.END
+    parts = query.data.split("_")
     if parts[1] == "done":
         ctx.user_data["run_minute"] = int(parts[2])
         return await _render_reminder_picker(query, ctx)
@@ -514,11 +547,15 @@ async def step_select_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx):
         return SELECT_REMINDER
     await query.answer()
-    if query.data == "cancel":
+    if query.data == "cx":
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear()
         return ConversationHandler.END
-    ctx.user_data["reminder_minutes"] = int(query.data.replace("reminder_", ""))
+    if query.data not in REMINDER_OPTIONS:
+        # Catch-all — unknown button, just re-show the reminder picker
+        return await _render_reminder_picker(query, ctx)
+    minutes, _ = REMINDER_OPTIONS[query.data]
+    ctx.user_data["reminder_minutes"] = minutes
     return await _render_confirmation(query, ctx)
 
 # ── Confirmation ──────────────────────────────────────────────────────────────
@@ -542,23 +579,23 @@ async def _render_confirmation(query, ctx):
 
     ctx.user_data["run_at_iso"] = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    chars        = [db.get_character_by_id(cid) for cid in selected]
-    member_lines = "\n".join(
-        f"  • *{ch['ign']}*" + (f" (@{ch['username']})" if ch and ch["username"] else "")
-        for ch in chars if ch
+    chars = [db.get_character_by_id(cid) for cid in selected]
+    member_names = ", ".join(ch["ign"] for ch in chars if ch)
+    _, reminder_str = REMINDER_OPTIONS.get(
+        next((k for k, (v, _) in REMINDER_OPTIONS.items() if v == reminder_mins), "r0"),
+        (0, "None")
     )
-    reminder_str = {60: "1 hour before", 30: "30 mins before", 15: "15 mins before", 0: "None"}.get(reminder_mins, "None")
 
     await query.edit_message_text(
         f"📋 *Run Summary — Please confirm:*\n\n"
         f"⚔️ {diff_icon(difficulty)} *{boss_name} {difficulty}*\n"
         f"📅 {d:02d}/{mo:02d}/{y} {hour:02d}:{minute:02d} SGT\n"
         f"⏰ Reminder: *{reminder_str}*\n\n"
-        f"👥 *Party ({len(chars)} members):*\n{member_lines}\n\n"
+        f"👥 *Party ({len(chars)}):* {member_names}\n\n"
         f"Tap *Confirm* to create and notify all members.",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Confirm & Notify", callback_data="run_confirm"),
-            InlineKeyboardButton("❌ Cancel",            callback_data="cancel"),
+            InlineKeyboardButton("❌ Cancel",            callback_data="cx"),
         ]]),
         parse_mode="Markdown"
     )
@@ -569,7 +606,7 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx):
         return CONFIRM_RUN
     await query.answer()
-    if query.data == "cancel":
+    if query.data == "cx":
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear()
         return ConversationHandler.END
@@ -596,10 +633,13 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 remind_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             )
 
-    members      = db.get_run_members(run_id)
-    leader       = update.effective_user.username or str(update.effective_user.id)
-    time_str     = f"{d:02d}/{mo:02d}/{y} {hour:02d}:{minute:02d} SGT"
-    reminder_str = {60: "1 hour before", 30: "30 mins before", 15: "15 mins before", 0: "None"}.get(reminder_mins, "None")
+    members  = db.get_run_members(run_id)
+    leader   = update.effective_user.username or str(update.effective_user.id)
+    time_str = f"{d:02d}/{mo:02d}/{y} {hour:02d}:{minute:02d} SGT"
+    _, reminder_str = REMINDER_OPTIONS.get(
+        next((k for k, (v, _) in REMINDER_OPTIONS.items() if v == reminder_mins), "r0"),
+        (0, "None")
+    )
 
     invite_text = (
         f"📨 *You've been invited to a boss run!*\n\n"
@@ -615,8 +655,8 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         + "\n\nTap below to respond:"
     )
     invite_kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Accept",  callback_data=f"rsvp:accept:{run_id}"),
-        InlineKeyboardButton("❌ Decline", callback_data=f"rsvp:decline:{run_id}"),
+        InlineKeyboardButton("✅ Accept",  callback_data=f"rsvp_accept_{run_id}"),
+        InlineKeyboardButton("❌ Decline", callback_data=f"rsvp_decline_{run_id}"),
     ]])
 
     await query.edit_message_text(
@@ -680,8 +720,9 @@ async def createrun_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query    = update.callback_query
     await query.answer()
-    _, action, run_id_str = query.data.split(":")
-    run_id   = int(run_id_str)
+    parts    = query.data.split("_")
+    action   = parts[1]
+    run_id   = int(parts[2])
     accepted = 1 if action == "accept" else -1
 
     run = db.get_run(run_id)
@@ -707,8 +748,7 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ch, rm   = matched
     db.set_member_response(run_id, ch["id"], accepted)
     members  = db.get_run_members(run_id)
-    run_dt   = get_run_dt(run)
-    sgt      = run_dt + timedelta(hours=8)
+    sgt      = get_run_dt(run) + timedelta(hours=8)
     time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
 
     party_lines = "\n".join(
@@ -852,7 +892,7 @@ async def cmd_runs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append("")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ── /chatid ───────────────────────────────────────────────────────────────────
+# ── /chatid & /version ────────────────────────────────────────────────────────
 
 async def cmd_chatid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -860,14 +900,16 @@ async def cmd_chatid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Chat ID: {chat.id}\nType: {chat.type}\nTitle: {getattr(chat, 'title', 'N/A')}"
     )
 
+async def cmd_version(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Bot version: v2.0 — full underscore callback rewrite")
+
 # ── Scheduler jobs ────────────────────────────────────────────────────────────
 
 async def send_reminders(app: Application):
     runs = db.get_runs_due_for_reminder()
     for run in runs:
         members  = db.get_run_members(run["id"])
-        run_dt   = get_run_dt(run)
-        sgt      = run_dt + timedelta(hours=8)
+        sgt      = get_run_dt(run) + timedelta(hours=8)
         time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
         msg = (
             f"⏰ *Boss Run Reminder!*\n\n"
@@ -895,8 +937,7 @@ async def auto_cancel_pending_runs(app: Application):
     for run in expired:
         db.cancel_run(run["id"])
         members  = db.get_run_members(run["id"])
-        run_dt   = get_run_dt(run)
-        sgt      = run_dt + timedelta(hours=8)
+        sgt      = get_run_dt(run) + timedelta(hours=8)
         time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
         pending  = [m for m in members if m["accepted"] == 0]
         msg = (
@@ -932,7 +973,7 @@ def main():
     log.info("Database initialised.")
 
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        log.error("❌ Set BOT_TOKEN as an environment variable on Railway.")
+        log.error("❌ Set BOT_TOKEN as an environment variable.")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -940,21 +981,18 @@ def main():
     createrun_conv = ConversationHandler(
         entry_points=[CommandHandler("createrun", createrun_start)],
         states={
-            SELECT_BOSS:    [CallbackQueryHandler(step_select_boss)],
-            SELECT_DIFF:    [CallbackQueryHandler(step_select_diff)],
-            SELECT_MEMBERS: [CallbackQueryHandler(step_toggle_member)],
-            SELECT_DATE:    [CallbackQueryHandler(step_select_date,     pattern=r"^cal:")],
-            SELECT_HOUR:    [CallbackQueryHandler(step_select_hour,     pattern=r"^hour:")],
-            SELECT_MINUTE:  [CallbackQueryHandler(step_select_minute,   pattern=r"^min:")],
-            SELECT_REMINDER:[
-                CallbackQueryHandler(step_select_reminder, pattern=r"^reminder_"),
-                CallbackQueryHandler(step_select_reminder, pattern=r"^cancel$"),
-            ],
-            CONFIRM_RUN:    [CallbackQueryHandler(step_confirm_run)],
+            SELECT_BOSS:    [CallbackQueryHandler(step_select_boss,     pattern=r"^boss_|^cx$")],
+            SELECT_DIFF:    [CallbackQueryHandler(step_select_diff,     pattern=r"^diff_|^cx$")],
+            SELECT_MEMBERS: [CallbackQueryHandler(step_toggle_member,   pattern=r"^tog_|^members_done$|^cx$")],
+            SELECT_DATE:    [CallbackQueryHandler(step_select_date,     pattern=r"^cal_")],
+            SELECT_HOUR:    [CallbackQueryHandler(step_select_hour,     pattern=r"^hr_|^cx$")],
+            SELECT_MINUTE:  [CallbackQueryHandler(step_select_minute,   pattern=r"^mn_|^cx$")],
+            SELECT_REMINDER:[CallbackQueryHandler(step_select_reminder, pattern=r"^r\d+$|^cx$")],
+            CONFIRM_RUN:    [CallbackQueryHandler(step_confirm_run,     pattern=r"^run_confirm$|^cx$")],
         },
         fallbacks=[
             CommandHandler("cancel", createrun_cancel),
-            CallbackQueryHandler(createrun_cancel, pattern=r"^cancel$"),
+            CallbackQueryHandler(createrun_cancel, pattern=r"^cx$"),
         ],
         per_message=False,
         per_chat=False,
@@ -962,7 +1000,7 @@ def main():
     )
 
     app.add_handler(createrun_conv)
-    app.add_handler(CallbackQueryHandler(rsvp_callback, pattern=r"^rsvp:"))
+    app.add_handler(CallbackQueryHandler(rsvp_callback, pattern=r"^rsvp_"))
     app.add_handler(CommandHandler("start",      cmd_start))
     app.add_handler(CommandHandler("help",       cmd_help))
     app.add_handler(CommandHandler("register",   cmd_register))
@@ -974,6 +1012,7 @@ def main():
     app.add_handler(CommandHandler("myruns",     cmd_myruns))
     app.add_handler(CommandHandler("runs",       cmd_runs))
     app.add_handler(CommandHandler("chatid",     cmd_chatid))
+    app.add_handler(CommandHandler("version",    cmd_version))
 
     async def on_startup(app: Application):
         scheduler = AsyncIOScheduler(timezone="UTC")
