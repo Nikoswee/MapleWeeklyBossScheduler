@@ -78,11 +78,11 @@ def init_db():
         )
     """)
     
-    c.execute("DELETE FROM bosses")
+# Sync bosses — add new ones, don't delete old ones (runs may reference them)
     for name, difficulties in BOSSES:
         for diff in difficulties:
             c.execute(
-                "INSERT INTO bosses (name, difficulty) VALUES (%s, %s)",
+                "INSERT INTO bosses (name, difficulty) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (name, diff)
             )
 
@@ -102,7 +102,7 @@ def _rows_to_dicts(cursor, rows):
 
 # ── Users & Characters ────────────────────────────────────────────────────────
 
-def upsert_user(telegram_id, username):
+def upsert_user(telegram_id, username):F
     conn = get_conn()
     c = conn.cursor()
     c.execute(
