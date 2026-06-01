@@ -1206,7 +1206,7 @@ def main():
             SELECT_BOSS:    [CallbackQueryHandler(step_select_boss,     pattern=r"^boss_\d+$|^cx$")],
             SELECT_DIFF:    [CallbackQueryHandler(step_select_diff,     pattern=r"^diff_\d+$|^cx$")],
             SELECT_MEMBERS: [CallbackQueryHandler(step_toggle_member,   pattern=r"^tog_\d+$|^members_done$|^cx$")],
-            SELECT_DATE:    [CallbackQueryHandler(step_select_date,     pattern=r"^cal_")],
+            SELECT_DATE:    [CallbackQueryHandler(step_select_date,     pattern=r"^cal_|^cx$")],
             SELECT_HOUR:    [CallbackQueryHandler(step_select_hour,     pattern=r"^hr_\d+$|^cx$")],
             SELECT_MINUTE:  [CallbackQueryHandler(step_select_minute,   pattern=r"^mn_|^cx$")],
             SELECT_REMINDER:[CallbackQueryHandler(step_select_reminder, pattern=r"^r\d+$|^cx$")],
@@ -1223,7 +1223,7 @@ def main():
         entry_points=[CommandHandler("editrun", editrun_start)],
         states={
             EDIT_CHOOSE:  [CallbackQueryHandler(edit_choose,        pattern=r"^edit_|^cx$")],
-            EDIT_DATE:    [CallbackQueryHandler(edit_select_date,   pattern=r"^cal_")],
+            EDIT_DATE:    [CallbackQueryHandler(edit_select_date,   pattern=r"^cal_|^cx$")],
             EDIT_HOUR:    [CallbackQueryHandler(edit_select_hour,   pattern=r"^hr_\d+$|^cx$")],
             EDIT_MINUTE:  [CallbackQueryHandler(edit_select_minute, pattern=r"^mn_|^cx$")],
             EDIT_MEMBERS: [CallbackQueryHandler(edit_toggle_member, pattern=r"^etog_\d+$|^emembers_done$|^cx$")],
