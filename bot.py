@@ -14,6 +14,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     ConversationHandler, MessageHandler, ContextTypes, filters
 )
+from telegram.request import HTTPXRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -1521,7 +1522,13 @@ def main():
         log.error("❌ Set BOT_TOKEN as an environment variable.")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    request = HTTPXRequest(
+    connect_timeout=20,
+    read_timeout=20,
+    write_timeout=20,
+    pool_timeout=20,
+    )
+    app = Application.builder().token(BOT_TOKEN).request(request).build()
 
     createrun_conv = ConversationHandler(
         entry_points=[CommandHandler("createrun", createrun_start)],
