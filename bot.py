@@ -1513,6 +1513,17 @@ async def auto_cancel_pending_runs(app: Application):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+
+    import asyncio
+
+    async def clear_updates():
+        from telegram import Bot
+        bot = Bot(token=BOT_TOKEN)
+        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.close()
+
+    asyncio.run(clear_updates())
+    
     db.init_db()
     log.info("Database initialised.")
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
