@@ -14,7 +14,6 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     ConversationHandler, MessageHandler, ContextTypes, filters
 )
-from telegram.request import HTTPXRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -37,13 +36,15 @@ log = logging.getLogger(__name__)
 (
     SELECT_BOSS,
     SELECT_DIFF,
+    SELECT_METHOD,
+    SELECT_TEAM,
     SELECT_MEMBERS,
     SELECT_DATE,
     SELECT_HOUR,
     SELECT_MINUTE,
     SELECT_REMINDER,
     CONFIRM_RUN,
-) = range(8)
+) = range(10)
 
 (
     EDIT_CHOOSE,
@@ -51,7 +52,7 @@ log = logging.getLogger(__name__)
     EDIT_HOUR,
     EDIT_MINUTE,
     EDIT_MEMBERS,
-) = range(8, 13)
+) = range(10, 15)
 
 (
     TEAM_NAME,
@@ -60,7 +61,7 @@ log = logging.getLogger(__name__)
     ETEAM_CHOOSE,
     ETEAM_NAME,
     ETEAM_MEMBERS,
-) = range(13, 19)
+) = range(15, 21)
 
 REMINDER_OPTIONS = {
     "r60": (60, "1 hour before"),
@@ -410,9 +411,54 @@ async def step_select_diff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     idx = int(query.data.split("_")[1])
     ctx.user_data["difficulty"]     = ctx.user_data["diff_list"][idx]
     ctx.user_data["selected_chars"] = []
-    return await _render_member_picker(query, ctx)
+    return await _render_method_picker(query, ctx)
+
+async def _render_method_picker(query, ctx):
+    """Step 3a — choose between team or individual."""
+    boss_name  = ctx.user_data["boss_name"]
+    difficulty = ctx.user_data["difficulty"]
+    teams      = db.get_all_teams()
+    keyboard   = []
+    if teams:
+        keyboard.append([InlineKeyboardButton("👥 Load from Team", callback_data="method_team")])
+    keyboard.append([InlineKeyboardButton("👤 Select Individually", callback_data="method_individual")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
+    await query.edit_message_text(
+        f"⚔️ Create a Boss Run\n\nBoss: {boss_name} {difficulty}\n\n"
+        f"Step 3 of 6 — How would you like to add members?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return SELECT_METHOD
+
+async def _render_team_picker_run(query, ctx):
+    """Step 3b-A — pick a preset team."""
+    boss_name  = ctx.user_data["boss_name"]
+    difficulty = ctx.user_data["difficulty"]
+    teams      = db.get_all_teams()
+
+    # Build message with team details
+    lines = [f"⚔️ Create a Boss Run\n\nBoss: {boss_name} {difficulty}\n\nPick a preset team:\n"]
+    for t in teams:
+        members = db.get_team_members(t["id"])
+        names   = " · ".join(m["ign"] for m in members)
+        lines.append(f"📋 {t['name']} ({len(members)} members)")
+        lines.append(f"    {names}\n")
+
+    # Team buttons
+    team_btns = [InlineKeyboardButton(t["name"], callback_data=f"pickteam_{t['id']}") for t in teams]
+    keyboard  = [team_btns[i:i+2] for i in range(0, len(team_btns), 2)]
+    keyboard.append([
+        InlineKeyboardButton("◀ Back", callback_data="method_back"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cx"),
+    ])
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return SELECT_TEAM
 
 async def _render_member_picker(query, ctx):
+    """Step 3b-B — individual character selection."""
     all_chars  = db.get_all_characters()
     ctx.user_data["char_list"] = [ch["id"] for ch in all_chars]
     selected   = ctx.user_data.get("selected_chars", [])
@@ -425,37 +471,61 @@ async def _render_member_picker(query, ctx):
         if ch["level"]: label += f" {ch['level']}"
         buttons.append(InlineKeyboardButton(label, callback_data=f"tog_{i}"))
     keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-    # Add "Load from team" buttons
-    teams = db.get_all_teams()
-    if teams:
-        team_btns = [InlineKeyboardButton(f"📋 {t['name']}", callback_data=f"loadteam_{t['id']}") for t in teams]
-        for i in range(0, len(team_btns), 2):
-            keyboard.append(team_btns[i:i+2])
     keyboard.append([
+        InlineKeyboardButton("◀ Back",              callback_data="members_back"),
         InlineKeyboardButton(f"✔️ Done ({len(selected)})", callback_data="members_done"),
-        InlineKeyboardButton("❌ Cancel", callback_data="cx"),
+        InlineKeyboardButton("❌ Cancel",             callback_data="cx"),
     ])
     await query.edit_message_text(
         f"⚔️ Create a Boss Run\n\nBoss: {boss_name} {difficulty}\n\n"
-        f"Step 3 of 6 — Select members (tap to toggle):\n"
-        f"Tap a 📋 team button to pre-load that team.",
+        f"Step 3 of 6 — Select members (tap to toggle):",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return SELECT_MEMBERS
 
+async def step_select_method(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Step 3a — handle method choice."""
+    query = update.callback_query
+    if not await _check_creator(query, ctx): return SELECT_METHOD
+    await query.answer()
+    if query.data == "cx":
+        await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear(); return ConversationHandler.END
+    if query.data == "method_team":
+        return await _render_team_picker_run(query, ctx)
+    if query.data == "method_individual":
+        ctx.user_data["selected_chars"] = []
+        return await _render_member_picker(query, ctx)
+    return SELECT_METHOD
+
+async def step_select_team(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Step 3b-A — handle team selection."""
+    query = update.callback_query
+    if not await _check_creator(query, ctx): return SELECT_TEAM
+    await query.answer()
+    if query.data == "cx":
+        await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear(); return ConversationHandler.END
+    if query.data == "method_back":
+        return await _render_method_picker(query, ctx)
+    if query.data.startswith("pickteam_"):
+        team_id = int(query.data.split("_")[1])
+        members = db.get_team_members(team_id)
+        ctx.user_data["selected_chars"] = [m["id"] for m in members]
+        return await _render_calendar(query, ctx)
+    return SELECT_TEAM
+
 async def step_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Step 3b-B — individual member toggle."""
     query = update.callback_query
     if not await _check_creator(query, ctx): return SELECT_MEMBERS
     if query.data == "cx":
         await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
-    if query.data.startswith("loadteam_"):
+    if query.data == "members_back":
         await query.answer()
-        team_id = int(query.data.split("_")[1])
-        members = db.get_team_members(team_id)
-        ctx.user_data["selected_chars"] = [m["id"] for m in members]
-        return await _render_member_picker(query, ctx)
+        return await _render_method_picker(query, ctx)
     if query.data == "members_done":
         if not ctx.user_data.get("selected_chars"):
             await query.answer("⚠️ Select at least one member first!", show_alert=True)
@@ -1522,20 +1592,16 @@ def main():
         log.error("❌ Set BOT_TOKEN as an environment variable.")
         return
 
-    request = HTTPXRequest(
-    connect_timeout=20,
-    read_timeout=20,
-    write_timeout=20,
-    pool_timeout=20,
-    )
-    app = Application.builder().token(BOT_TOKEN).request(request).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
     createrun_conv = ConversationHandler(
         entry_points=[CommandHandler("createrun", createrun_start)],
         states={
             SELECT_BOSS:    [CallbackQueryHandler(step_select_boss,     pattern=r"^boss_\d+$|^cx$")],
             SELECT_DIFF:    [CallbackQueryHandler(step_select_diff,     pattern=r"^diff_\d+$|^cx$")],
-            SELECT_MEMBERS: [CallbackQueryHandler(step_toggle_member,   pattern=r"^tog_\d+$|^members_done$|^loadteam_\d+$|^cx$")],
+            SELECT_METHOD:  [CallbackQueryHandler(step_select_method,   pattern=r"^method_|^cx$")],
+            SELECT_TEAM:    [CallbackQueryHandler(step_select_team,     pattern=r"^pickteam_\d+$|^method_back$|^cx$")],
+            SELECT_MEMBERS: [CallbackQueryHandler(step_toggle_member,   pattern=r"^tog_\d+$|^members_done$|^members_back$|^cx$")],
             SELECT_DATE:    [CallbackQueryHandler(step_select_date,     pattern=r"^cal_|^cx$")],
             SELECT_HOUR:    [CallbackQueryHandler(step_select_hour,     pattern=r"^hr_\d+$|^cx$")],
             SELECT_MINUTE:  [CallbackQueryHandler(step_select_minute,   pattern=r"^mn_|^cx$")],
