@@ -12,7 +12,7 @@ import calendar
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    ConversationHandler, ContextTypes
+    ConversationHandler, MessageHandler, ContextTypes, filters
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -170,8 +170,11 @@ async def _check_editor(query, ctx) -> bool:
 def build_calendar(year, month):
     now      = datetime.now(timezone(timedelta(hours=8)))
     keyboard = []
+
+    # Only show ◀ if there are future months to go back to (not before current month)
+    can_prev = (year, month) > (now.year, now.month)
     keyboard.append([
-        InlineKeyboardButton("◀", callback_data=f"cal_prev_{year}_{month}"),
+        InlineKeyboardButton("◀" if can_prev else " ", callback_data=f"cal_prev_{year}_{month}" if can_prev else "cal_noop"),
         InlineKeyboardButton(f"{calendar.month_name[month]} {year}", callback_data="cal_noop"),
         InlineKeyboardButton("▶", callback_data=f"cal_next_{year}_{month}"),
     ])
@@ -181,16 +184,21 @@ def build_calendar(year, month):
     ])
     for week in calendar.monthcalendar(year, month):
         row = []
+        has_valid = False
         for day in week:
             if day == 0:
                 row.append(InlineKeyboardButton(" ", callback_data="cal_noop"))
             else:
                 dt   = datetime(year, month, day, tzinfo=timezone(timedelta(hours=8)))
                 past = dt.date() < now.date()
-                label = f"{day}" if past else f"✦{day}"
-                cb    = "cal_noop" if past else f"cal_day_{year}_{month}_{day}"
-                row.append(InlineKeyboardButton(label, callback_data=cb))
-        keyboard.append(row)
+                if past:
+                    # Show blank for past days instead of the number
+                    row.append(InlineKeyboardButton(" ", callback_data="cal_noop"))
+                else:
+                    has_valid = True
+                    row.append(InlineKeyboardButton(str(day), callback_data=f"cal_day_{year}_{month}_{day}"))
+        if has_valid or any(d != 0 for d in week):
+            keyboard.append(row)
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
     return InlineKeyboardMarkup(keyboard)
 
