@@ -364,8 +364,6 @@ def get_user_runs(telegram_id):
     return result
 
 def get_runs_due_for_reminder():
-    """Confirmed runs whose remind_at has passed but run hasn't started yet.
-    Uses a wider 30-minute lookback to handle scheduler delays."""
     conn = get_conn()
     c = conn.cursor()
     c.execute(
