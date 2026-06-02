@@ -76,6 +76,9 @@ def init_db():
         )
     """)
 
+    # Create teams tables
+    init_teams_table(conn)
+
     # Sync bosses — only add new ones, never delete (runs may reference old IDs)
     for name, difficulties in BOSSES:
         for diff in difficulties:
@@ -421,3 +424,134 @@ def reset_run_members(run_id, new_char_ids):
     c.execute("UPDATE runs SET status='pending' WHERE id=%s", (run_id,))
     conn.commit()
     conn.close()
+
+# ── Teams ─────────────────────────────────────────────────────────────────────
+
+def init_teams_table(conn=None):
+    close = conn is None
+    if conn is None:
+        conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS teams (
+            id          SERIAL PRIMARY KEY,
+            name        TEXT NOT NULL UNIQUE,
+            created_by  BIGINT NOT NULL REFERENCES users(telegram_id)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS team_members (
+            id           SERIAL PRIMARY KEY,
+            team_id      INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+            UNIQUE(team_id, character_id)
+        )
+    """)
+    conn.commit()
+    if close:
+        conn.close()
+
+def create_team(name, created_by, char_ids):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute(
+            "INSERT INTO teams (name, created_by) VALUES (%s, %s) RETURNING id",
+            (name, created_by)
+        )
+        team_id = c.fetchone()[0]
+        for cid in char_ids:
+            c.execute(
+                "INSERT INTO team_members (team_id, character_id) VALUES (%s, %s)",
+                (team_id, cid)
+            )
+        conn.commit()
+        return team_id, None
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return None, f"A team named '{name}' already exists."
+    finally:
+        conn.close()
+
+def get_all_teams():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT t.*, u.username as creator_username
+           FROM teams t
+           JOIN users u ON u.telegram_id=t.created_by
+           ORDER BY t.name"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+def get_team_by_name(name):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT t.*, u.username as creator_username
+           FROM teams t
+           JOIN users u ON u.telegram_id=t.created_by
+           WHERE LOWER(t.name)=LOWER(%s)""",
+        (name,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+def get_team_by_id(team_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT t.*, u.username as creator_username
+           FROM teams t
+           JOIN users u ON u.telegram_id=t.created_by
+           WHERE t.id=%s""",
+        (team_id,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+def get_team_members(team_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ch.*, u.username FROM team_members tm
+           JOIN characters ch ON ch.id=tm.character_id
+           JOIN users u ON u.telegram_id=ch.telegram_id
+           WHERE tm.team_id=%s ORDER BY ch.ign""",
+        (team_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+def update_team(team_id, new_name, new_char_ids):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE teams SET name=%s WHERE id=%s", (new_name, team_id))
+        c.execute("DELETE FROM team_members WHERE team_id=%s", (team_id,))
+        for cid in new_char_ids:
+            c.execute(
+                "INSERT INTO team_members (team_id, character_id) VALUES (%s, %s)",
+                (team_id, cid)
+            )
+        conn.commit()
+        return True, None
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return False, f"A team named '{new_name}' already exists."
+    finally:
+        conn.close()
+
+def delete_team(team_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM teams WHERE id=%s", (team_id,))
+    deleted = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
