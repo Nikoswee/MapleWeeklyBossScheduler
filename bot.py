@@ -615,7 +615,11 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def createrun_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
-    await update.message.reply_text("❌ Run creation cancelled.")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("❌ Run creation cancelled.")
+    elif update.message:
+        await update.message.reply_text("❌ Run creation cancelled.")
     return ConversationHandler.END
 
 # ── Shared notification helper ────────────────────────────────────────────────
@@ -885,7 +889,11 @@ async def _apply_members_edit(query, ctx):
 
 async def editrun_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
-    await update.message.reply_text("❌ Edit cancelled.")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("❌ Edit cancelled.")
+    elif update.message:
+        await update.message.reply_text("❌ Edit cancelled.")
     return ConversationHandler.END
 
 # ── /resendrun ────────────────────────────────────────────────────────────────
