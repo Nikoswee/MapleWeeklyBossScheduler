@@ -1514,8 +1514,6 @@ async def auto_cancel_pending_runs(app: Application):
 
 def main():
 
-    import asyncio
-
     async def clear_updates():
         from telegram import Bot
         bot = Bot(token=BOT_TOKEN)
