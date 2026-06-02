@@ -52,6 +52,15 @@ log = logging.getLogger(__name__)
     EDIT_MEMBERS,
 ) = range(8, 13)
 
+(
+    TEAM_NAME,
+    TEAM_MEMBERS,
+    TEAM_CONFIRM,
+    ETEAM_CHOOSE,
+    ETEAM_NAME,
+    ETEAM_MEMBERS,
+) = range(13, 19)
+
 REMINDER_OPTIONS = {
     "r60": (60, "1 hour before"),
     "r30": (30, "30 mins before"),
@@ -402,13 +411,20 @@ async def _render_member_picker(query, ctx):
         if ch["level"]: label += f" {ch['level']}"
         buttons.append(InlineKeyboardButton(label, callback_data=f"tog_{i}"))
     keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    # Add "Load from team" buttons
+    teams = db.get_all_teams()
+    if teams:
+        team_btns = [InlineKeyboardButton(f"📋 {t['name']}", callback_data=f"loadteam_{t['id']}") for t in teams]
+        for i in range(0, len(team_btns), 2):
+            keyboard.append(team_btns[i:i+2])
     keyboard.append([
         InlineKeyboardButton(f"✔️ Done ({len(selected)})", callback_data="members_done"),
         InlineKeyboardButton("❌ Cancel", callback_data="cx"),
     ])
     await query.edit_message_text(
         f"⚔️ Create a Boss Run\n\nBoss: {boss_name} {difficulty}\n\n"
-        f"Step 3 of 6 — Select party members:\n(tap to toggle)",
+        f"Step 3 of 6 — Select members (tap to toggle):\n"
+        f"Tap a 📋 team button to pre-load that team.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return SELECT_MEMBERS
@@ -420,6 +436,12 @@ async def step_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
+    if query.data.startswith("loadteam_"):
+        await query.answer()
+        team_id = int(query.data.split("_")[1])
+        members = db.get_team_members(team_id)
+        ctx.user_data["selected_chars"] = [m["id"] for m in members]
+        return await _render_member_picker(query, ctx)
     if query.data == "members_done":
         if not ctx.user_data.get("selected_chars"):
             await query.answer("⚠️ Select at least one member first!", show_alert=True)
@@ -686,6 +708,284 @@ async def _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute
     if failed:
         summary += f"\n⚠️ Couldn't DM: {', '.join(failed)} — they need to send /start to the bot first."
     await ctx.bot.send_message(chat_id=chat_id, text=summary)
+
+
+# ── Teams helpers ─────────────────────────────────────────────────────────────
+
+async def _render_team_picker(target, ctx, is_edit=False):
+    """Render member picker for team create/edit. target can be query or update."""
+    all_chars  = db.get_all_characters()
+    ctx.user_data["char_list"] = [ch["id"] for ch in all_chars]
+    selected   = ctx.user_data.get("selected_chars", [])
+    name       = ctx.user_data.get("team_name") or ctx.user_data.get("eteam_name", "")
+    step       = "Edit Team" if is_edit else "Step 2 of 3"
+
+    buttons = []
+    for i, ch in enumerate(all_chars):
+        tick  = "✅" if ch["id"] in selected else "⬜"
+        label = f"{tick} {ch['ign']}"
+        if ch["level"]: label += f" {ch['level']}"
+        buttons.append(InlineKeyboardButton(label, callback_data=f"ttog_{i}"))
+
+    keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    keyboard.append([
+        InlineKeyboardButton(f"✔️ Done ({len(selected)})", callback_data="tmembers_done"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cx"),
+    ])
+    text = (
+        f"👥 {step}\n\n"
+        f"Team: {name}\n\n"
+        f"Select members (tap to toggle):"
+    )
+    markup = InlineKeyboardMarkup(keyboard)
+    if hasattr(target, "edit_message_text"):
+        await target.edit_message_text(text, reply_markup=markup)
+    else:
+        await target.message.reply_text(text, reply_markup=markup)
+    return ETEAM_MEMBERS if is_edit else TEAM_MEMBERS
+
+def _check_team_creator(query, ctx):
+    return query.from_user.id == ctx.user_data.get("team_creator_id")
+
+# ── /createteam ───────────────────────────────────────────────────────────────
+
+async def createteam_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db.upsert_user(update.effective_user.id, update.effective_user.username or "")
+    ctx.user_data.clear()
+    ctx.user_data["team_creator_id"] = update.effective_user.id
+    await update.message.reply_text(
+        "👥 Create a Preset Team\n\n"
+        "Step 1 of 3 — Type the team name and send it.\n"
+        "Example: Lotus Party, Weekly 6man\n\n"
+        "Or /cancel to stop."
+    )
+    return TEAM_NAME
+
+async def team_get_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ctx.user_data.get("team_creator_id"):
+        return TEAM_NAME
+    name = update.message.text.strip()
+    if not name:
+        await update.message.reply_text("⚠️ Team name cannot be empty. Try again:")
+        return TEAM_NAME
+    if len(name) > 50:
+        await update.message.reply_text("⚠️ Max 50 characters. Try again:")
+        return TEAM_NAME
+    ctx.user_data["team_name"]      = name
+    ctx.user_data["selected_chars"] = []
+    return await _render_team_picker(update, ctx, is_edit=False)
+
+async def team_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _check_team_creator(query, ctx):
+        await query.answer("⚠️ Only the team creator can use these buttons.", show_alert=True)
+        return TEAM_MEMBERS
+    if query.data == "cx":
+        await query.answer()
+        await query.edit_message_text("❌ Team creation cancelled.")
+        ctx.user_data.clear(); return ConversationHandler.END
+    if query.data == "tmembers_done":
+        if not ctx.user_data.get("selected_chars"):
+            await query.answer("⚠️ Select at least one member!", show_alert=True)
+            return TEAM_MEMBERS
+        await query.answer()
+        # Show confirmation
+        name     = ctx.user_data["team_name"]
+        selected = ctx.user_data["selected_chars"]
+        chars    = [db.get_character_by_id(cid) for cid in selected]
+        members  = ", ".join(ch["ign"] for ch in chars if ch)
+        await query.edit_message_text(
+            f"📋 Team Summary\n\nTeam: {name}\nMembers ({len(chars)}): {members}\n\nConfirm?",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Confirm", callback_data="tconfirm"),
+                InlineKeyboardButton("❌ Cancel",  callback_data="cx"),
+            ]])
+        )
+        return TEAM_CONFIRM
+    await query.answer()
+    idx      = int(query.data.split("_")[1])
+    char_id  = ctx.user_data["char_list"][idx]
+    selected = ctx.user_data.get("selected_chars", [])
+    if char_id in selected: selected.remove(char_id)
+    else: selected.append(char_id)
+    ctx.user_data["selected_chars"] = selected
+    return await _render_team_picker(query, ctx, is_edit=False)
+
+async def team_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _check_team_creator(query, ctx):
+        await query.answer("⚠️ Only the team creator can confirm.", show_alert=True)
+        return TEAM_CONFIRM
+    await query.answer()
+    if query.data == "cx":
+        await query.edit_message_text("❌ Team creation cancelled.")
+        ctx.user_data.clear(); return ConversationHandler.END
+    name     = ctx.user_data["team_name"]
+    selected = ctx.user_data["selected_chars"]
+    team_id, err = db.create_team(name, update.effective_user.id, selected)
+    if err:
+        await query.edit_message_text(f"⚠️ {err}\nUse /createteam to try again.")
+    else:
+        chars   = [db.get_character_by_id(cid) for cid in selected]
+        members = ", ".join(ch["ign"] for ch in chars if ch)
+        await query.edit_message_text(
+            f"✅ Team saved!\n\nName: {name}\nMembers ({len(chars)}): {members}\n\n"
+            f"Use /teams to see all teams.\n"
+            f"When creating a run, tap Load from team to pre-select this team."
+        )
+    ctx.user_data.clear()
+    return ConversationHandler.END
+
+async def createteam_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("❌ Team creation cancelled.")
+    elif update.message:
+        await update.message.reply_text("❌ Team creation cancelled.")
+    return ConversationHandler.END
+
+# ── /teams ────────────────────────────────────────────────────────────────────
+
+async def cmd_teams(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    teams = db.get_all_teams()
+    if not teams:
+        await update.message.reply_text(
+            "No preset teams yet. Use /createteam to create one."
+        ); return
+    lines = ["👥 Preset Teams\n"]
+    for t in teams:
+        members = db.get_team_members(t["id"])
+        names   = ", ".join(m["ign"] for m in members)
+        lines.append(f"• {t['name']} ({len(members)} members)")
+        lines.append(f"  {names}")
+        lines.append("")
+    lines.append("Commands: /editteam <name> · /deleteteam <name>")
+    await update.message.reply_text("\n".join(lines))
+
+# ── /editteam ─────────────────────────────────────────────────────────────────
+
+async def editteam_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db.upsert_user(update.effective_user.id, update.effective_user.username or "")
+    if not ctx.args:
+        await update.message.reply_text("Usage: /editteam <team name>\nExample: /editteam Lotus Party")
+        return ConversationHandler.END
+    name = " ".join(ctx.args)
+    team = db.get_team_by_name(name)
+    if not team:
+        await update.message.reply_text(f"⚠️ Team not found. Use /teams to see all teams.")
+        return ConversationHandler.END
+    ctx.user_data.clear()
+    ctx.user_data["team_creator_id"] = update.effective_user.id
+    ctx.user_data["edit_team_id"]    = team["id"]
+    ctx.user_data["eteam_name"]      = team["name"]
+    current = db.get_team_members(team["id"])
+    ctx.user_data["selected_chars"]  = [m["id"] for m in current]
+    await update.message.reply_text(
+        f"✏️ Edit Team: {team['name']}\n\nWhat would you like to edit?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Rename",      callback_data="eteam_rename")],
+            [InlineKeyboardButton("👥 Edit Members", callback_data="eteam_members")],
+            [InlineKeyboardButton("❌ Cancel",       callback_data="cx")],
+        ])
+    )
+    return ETEAM_CHOOSE
+
+async def eteam_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _check_team_creator(query, ctx):
+        await query.answer("⚠️ Only the team creator can edit.", show_alert=True)
+        return ETEAM_CHOOSE
+    await query.answer()
+    if query.data == "cx":
+        await query.edit_message_text("❌ Edit cancelled.")
+        ctx.user_data.clear(); return ConversationHandler.END
+    if query.data == "eteam_rename":
+        await query.edit_message_text(
+            f"✏️ Rename Team\n\nCurrent name: {ctx.user_data['eteam_name']}\n\n"
+            f"Type the new name and send it:\n(or /cancel to stop)"
+        )
+        return ETEAM_NAME
+    if query.data == "eteam_members":
+        return await _render_team_picker(query, ctx, is_edit=True)
+    return ETEAM_CHOOSE
+
+async def eteam_get_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ctx.user_data.get("team_creator_id"):
+        return ETEAM_NAME
+    name = update.message.text.strip()
+    if not name or len(name) > 50:
+        await update.message.reply_text("⚠️ Invalid name. Try again (max 50 chars):")
+        return ETEAM_NAME
+    team_id = ctx.user_data["edit_team_id"]
+    current = db.get_team_members(team_id)
+    ok, err = db.update_team(team_id, name, [m["id"] for m in current])
+    if ok:
+        await update.message.reply_text(f"✅ Team renamed to {name}!")
+    else:
+        await update.message.reply_text(f"⚠️ {err}")
+    ctx.user_data.clear()
+    return ConversationHandler.END
+
+async def eteam_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _check_team_creator(query, ctx):
+        await query.answer("⚠️ Only the team creator can edit.", show_alert=True)
+        return ETEAM_MEMBERS
+    if query.data == "cx":
+        await query.answer()
+        await query.edit_message_text("❌ Edit cancelled.")
+        ctx.user_data.clear(); return ConversationHandler.END
+    if query.data == "tmembers_done":
+        if not ctx.user_data.get("selected_chars"):
+            await query.answer("⚠️ Select at least one member!", show_alert=True)
+            return ETEAM_MEMBERS
+        await query.answer()
+        team_id  = ctx.user_data["edit_team_id"]
+        name     = ctx.user_data["eteam_name"]
+        selected = ctx.user_data["selected_chars"]
+        ok, err  = db.update_team(team_id, name, selected)
+        if ok:
+            chars   = [db.get_character_by_id(cid) for cid in selected]
+            members = ", ".join(ch["ign"] for ch in chars if ch)
+            await query.edit_message_text(
+                f"✅ Team updated!\nName: {name}\nMembers ({len(chars)}): {members}"
+            )
+        else:
+            await query.edit_message_text(f"⚠️ {err}")
+        ctx.user_data.clear()
+        return ConversationHandler.END
+    await query.answer()
+    idx      = int(query.data.split("_")[1])
+    char_id  = ctx.user_data["char_list"][idx]
+    selected = ctx.user_data.get("selected_chars", [])
+    if char_id in selected: selected.remove(char_id)
+    else: selected.append(char_id)
+    ctx.user_data["selected_chars"] = selected
+    return await _render_team_picker(query, ctx, is_edit=True)
+
+async def editteam_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("❌ Edit cancelled.")
+    elif update.message:
+        await update.message.reply_text("❌ Edit cancelled.")
+    return ConversationHandler.END
+
+# ── /deleteteam ───────────────────────────────────────────────────────────────
+
+async def cmd_deleteteam(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Usage: /deleteteam <team name>\nExample: /deleteteam Lotus Party")
+        return
+    name = " ".join(ctx.args)
+    team = db.get_team_by_name(name)
+    if not team:
+        await update.message.reply_text(f"⚠️ Team not found. Use /teams to see all teams.")
+        return
+    db.delete_team(team["id"])
+    await update.message.reply_text(f"🗑️ Team deleted.")
 
 # ── /editrun ──────────────────────────────────────────────────────────────────
 
@@ -1213,7 +1513,7 @@ def main():
         states={
             SELECT_BOSS:    [CallbackQueryHandler(step_select_boss,     pattern=r"^boss_\d+$|^cx$")],
             SELECT_DIFF:    [CallbackQueryHandler(step_select_diff,     pattern=r"^diff_\d+$|^cx$")],
-            SELECT_MEMBERS: [CallbackQueryHandler(step_toggle_member,   pattern=r"^tog_\d+$|^members_done$|^cx$")],
+            SELECT_MEMBERS: [CallbackQueryHandler(step_toggle_member,   pattern=r"^tog_\d+$|^members_done$|^loadteam_\d+$|^cx$")],
             SELECT_DATE:    [CallbackQueryHandler(step_select_date,     pattern=r"^cal_|^cx$")],
             SELECT_HOUR:    [CallbackQueryHandler(step_select_hour,     pattern=r"^hr_\d+$|^cx$")],
             SELECT_MINUTE:  [CallbackQueryHandler(step_select_minute,   pattern=r"^mn_|^cx$")],
@@ -1243,8 +1543,38 @@ def main():
         per_message=False, per_chat=False, per_user=True,
     )
 
+    createteam_conv = ConversationHandler(
+        entry_points=[CommandHandler("createteam", createteam_start)],
+        states={
+            TEAM_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, team_get_name)],
+            TEAM_MEMBERS: [CallbackQueryHandler(team_toggle_member, pattern=r"^ttog_\d+$|^tmembers_done$|^cx$")],
+            TEAM_CONFIRM: [CallbackQueryHandler(team_confirm,       pattern=r"^tconfirm$|^cx$")],
+        },
+        fallbacks=[
+            CommandHandler("cancel", createteam_cancel),
+            CallbackQueryHandler(createteam_cancel, pattern=r"^cx$"),
+        ],
+        per_message=False, per_chat=False, per_user=True,
+    )
+
+    editteam_conv = ConversationHandler(
+        entry_points=[CommandHandler("editteam", editteam_start)],
+        states={
+            ETEAM_CHOOSE:  [CallbackQueryHandler(eteam_choose,        pattern=r"^eteam_|^cx$")],
+            ETEAM_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, eteam_get_name)],
+            ETEAM_MEMBERS: [CallbackQueryHandler(eteam_toggle_member, pattern=r"^ttog_\d+$|^tmembers_done$|^cx$")],
+        },
+        fallbacks=[
+            CommandHandler("cancel", editteam_cancel),
+            CallbackQueryHandler(editteam_cancel, pattern=r"^cx$"),
+        ],
+        per_message=False, per_chat=False, per_user=True,
+    )
+
     app.add_handler(createrun_conv)
     app.add_handler(editrun_conv)
+    app.add_handler(createteam_conv)
+    app.add_handler(editteam_conv)
     app.add_handler(CallbackQueryHandler(rsvp_callback, pattern=r"^rsvp_"))
     app.add_handler(CommandHandler("start",      cmd_start))
     app.add_handler(CommandHandler("help",       cmd_help))
@@ -1257,6 +1587,8 @@ def main():
     app.add_handler(CommandHandler("resendrun",  cmd_resendrun))
     app.add_handler(CommandHandler("myruns",     cmd_myruns))
     app.add_handler(CommandHandler("runs",       cmd_runs))
+    app.add_handler(CommandHandler("teams",      cmd_teams))
+    app.add_handler(CommandHandler("deleteteam", cmd_deleteteam))
     app.add_handler(CommandHandler("chatid",     cmd_chatid))
     app.add_handler(CommandHandler("version",    cmd_version))
 
