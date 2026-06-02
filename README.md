@@ -124,13 +124,13 @@ Type `/version` in Telegram — the bot replies with its start time in SGT confi
 | `/runs` | See all upcoming guild runs (grouped by status) |
 
 ### Utility
-
+ 
 | Command | Description |
 |---|---|
-| `/start` | Register yourself and see the welcome message |
+| `/start` | to DM the bot to register |
 | `/help` | Show all commands |
 | `/chatid` | Get the current chat ID and thread ID |
-| `/version` | Show bot start time in SGT |
+| `/version` | Show last deployed version's time in SGT |
 
 ---
 
