@@ -273,7 +273,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Bosses:\n"
         "/bosses\n\n"
         "Preset Teams:\n"
-        "/createteam — create a preset team\n"
+        "/createteam <name> — create a preset team\n"
         "/teams — list all preset teams\n"
         "/editteam <name> — rename or change members\n"
         "/deleteteam <name> — delete a team\n\n"
@@ -764,29 +764,24 @@ def _check_team_creator(query, ctx):
 
 async def createteam_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.upsert_user(update.effective_user.id, update.effective_user.username or "")
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage: /createteam <team name>\n"
+            "Example: /createteam Lotus Party\n"
+            "Example: /createteam CKALOS 3MAN RUN"
+        )
+        return ConversationHandler.END
+    name = " ".join(ctx.args).strip()
+    if len(name) > 50:
+        await update.message.reply_text("⚠️ Team name too long (max 50 chars). Try again.")
+        return ConversationHandler.END
     ctx.user_data.clear()
     ctx.user_data["team_creator_id"] = update.effective_user.id
-    await update.message.reply_text(
-        "👥 Create a Preset Team\n\n"
-        "Step 1 of 3 — Type the team name and send it.\n"
-        "Example: Lotus Party, Weekly 6man\n\n"
-        "Or /cancel to stop."
-    )
-    return TEAM_NAME
-
-async def team_get_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ctx.user_data.get("team_creator_id"):
-        return TEAM_NAME
-    name = update.message.text.strip()
-    if not name:
-        await update.message.reply_text("⚠️ Team name cannot be empty. Try again:")
-        return TEAM_NAME
-    if len(name) > 50:
-        await update.message.reply_text("⚠️ Max 50 characters. Try again:")
-        return TEAM_NAME
-    ctx.user_data["team_name"]      = name
-    ctx.user_data["selected_chars"] = []
+    ctx.user_data["team_name"]       = name
+    ctx.user_data["selected_chars"]  = []
     return await _render_team_picker(update, ctx, is_edit=False)
+
+
 
 async def team_toggle_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -914,11 +909,18 @@ async def eteam_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Edit cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     if query.data == "eteam_rename":
+        # Show rename instruction — name comes via /editteam <newname> so tell user to re-run
         await query.edit_message_text(
-            f"✏️ Rename Team\n\nCurrent name: {ctx.user_data['eteam_name']}\n\n"
-            f"Type the new name and send it:\n(or /cancel to stop)"
+            f"✏️ To rename the team, use:\n"
+            f"/editteam <new name>\n\n"
+            f"This will open the edit menu for the new name.\n"
+            f"Then use Edit Members to restore the members.\n\n"
+            f"Or delete and recreate:\n"
+            f"/deleteteam {ctx.user_data['eteam_name']}\n"
+            f"/createteam <new name>"
         )
-        return ETEAM_NAME
+        ctx.user_data.clear()
+        return ConversationHandler.END
     if query.data == "eteam_members":
         return await _render_team_picker(query, ctx, is_edit=True)
     return ETEAM_CHOOSE
@@ -1513,7 +1515,6 @@ async def auto_cancel_pending_runs(app: Application):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-            
     db.init_db()
     log.info("Database initialised.")
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
@@ -1560,7 +1561,6 @@ def main():
     createteam_conv = ConversationHandler(
         entry_points=[CommandHandler("createteam", createteam_start)],
         states={
-            TEAM_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, team_get_name)],
             TEAM_MEMBERS: [CallbackQueryHandler(team_toggle_member, pattern=r"^ttog_\d+$|^tmembers_done$|^cx$")],
             TEAM_CONFIRM: [CallbackQueryHandler(team_confirm,       pattern=r"^tconfirm$|^cx$")],
         },
@@ -1575,7 +1575,6 @@ def main():
         entry_points=[CommandHandler("editteam", editteam_start)],
         states={
             ETEAM_CHOOSE:  [CallbackQueryHandler(eteam_choose,        pattern=r"^eteam_|^cx$")],
-            ETEAM_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, eteam_get_name)],
             ETEAM_MEMBERS: [CallbackQueryHandler(eteam_toggle_member, pattern=r"^ttog_\d+$|^tmembers_done$|^cx$")],
         },
         fallbacks=[
@@ -1621,7 +1620,7 @@ def main():
 
     app.post_init = on_startup
     log.info("🍄 Bot is running.")
-    app.run_polling(drop_pending_updates=True, close_loop=False)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
