@@ -475,21 +475,29 @@ def upsert_discord_user(discord_id, username):
     conn.close()
 
 def add_character_discord(discord_id, ign, cls=None, level=None):
-    """Register a character linked to a Discord user."""
+    """Register a character linked to a Discord user.
+    If the Discord user has a linked Telegram account, use that telegram_id.
+    Otherwise create a placeholder user with negative discord_id."""
     conn = get_conn()
     c = conn.cursor()
-    # Ensure discord user exists in users table too
-    c.execute(
-        """INSERT INTO users (telegram_id, username)
-           VALUES (%s, %s)
-           ON CONFLICT (telegram_id) DO NOTHING""",
-        (-discord_id, f"discord:{discord_id}")
-    )
+
+    # Check if this Discord user has a linked Telegram account
+    c.execute("SELECT telegram_id FROM discord_users WHERE discord_id=%s AND telegram_id IS NOT NULL", (discord_id,))
+    row = c.fetchone()
+    if row and row[0] and row[0] > 0:
+        owner_tid = row[0]
+    else:
+        # No linked Telegram — use placeholder negative discord_id
+        owner_tid = -discord_id
+        c.execute(
+            "INSERT INTO users (telegram_id, username) VALUES (%s, %s) ON CONFLICT (telegram_id) DO NOTHING",
+            (owner_tid, f"discord:{discord_id}")
+        )
+
     try:
         c.execute(
-            """INSERT INTO characters (telegram_id, ign, class, level, discord_id)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (-discord_id, ign, cls, level, discord_id)
+            "INSERT INTO characters (telegram_id, ign, class, level, discord_id) VALUES (%s, %s, %s, %s, %s)",
+            (owner_tid, ign, cls, level, discord_id)
         )
         conn.commit()
         return True
