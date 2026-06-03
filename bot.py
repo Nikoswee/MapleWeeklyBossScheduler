@@ -386,6 +386,7 @@ async def step_select_boss(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx): return SELECT_BOSS
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     idx       = int(query.data.split("_")[1])
@@ -409,6 +410,7 @@ async def step_select_diff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx): return SELECT_DIFF
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     idx = int(query.data.split("_")[1])
@@ -492,6 +494,7 @@ async def step_select_method(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx): return SELECT_METHOD
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     if query.data == "method_team":
@@ -507,6 +510,7 @@ async def step_select_team(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx): return SELECT_TEAM
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     if query.data == "method_back":
@@ -564,6 +568,7 @@ async def step_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx): return SELECT_DATE
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     if query.data == "cal_noop": return SELECT_DATE
@@ -602,6 +607,7 @@ async def step_select_hour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx): return SELECT_HOUR
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     ctx.user_data["run_hour"]   = int(query.data.split("_")[1])
@@ -628,6 +634,7 @@ async def step_select_minute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer(); return SELECT_MINUTE
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     parts = query.data.split("_")
@@ -655,6 +662,7 @@ async def step_select_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx): return SELECT_REMINDER
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     if query.data not in REMINDER_OPTIONS:
@@ -697,6 +705,7 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_creator(query, ctx): return CONFIRM_RUN
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Run creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     boss_name     = ctx.user_data["boss_name"]
@@ -900,6 +909,7 @@ async def team_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return TEAM_CONFIRM
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Team creation cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     name     = ctx.user_data["team_name"]
@@ -980,6 +990,7 @@ async def eteam_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ETEAM_CHOOSE
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Edit cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     if query.data == "eteam_rename":
@@ -1122,6 +1133,7 @@ async def edit_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_editor(query, ctx): return EDIT_CHOOSE
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Edit cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     if query.data == "edit_datetime":
@@ -1141,6 +1153,7 @@ async def edit_select_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_editor(query, ctx): return EDIT_DATE
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Edit cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     if query.data == "cal_noop": return EDIT_DATE
@@ -1168,6 +1181,7 @@ async def edit_select_hour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _check_editor(query, ctx): return EDIT_HOUR
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Edit cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     ctx.user_data["run_hour"]   = int(query.data.split("_")[1])
@@ -1181,6 +1195,7 @@ async def edit_select_minute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer(); return EDIT_MINUTE
     await query.answer()
     if query.data == "cx":
+        await query.answer()
         await query.edit_message_text("❌ Edit cancelled.")
         ctx.user_data.clear(); return ConversationHandler.END
     parts = query.data.split("_")
