@@ -80,6 +80,8 @@ def init_db():
     init_teams_table(conn)
     # Create discord tables
     init_discord_tables(conn)
+    # Create link codes table
+    init_link_table(conn)
 
     # Sync bosses — only add new ones, never delete (runs may reference old IDs)
     for name, difficulties in BOSSES:
@@ -659,6 +661,116 @@ def get_runs_due_for_reminder_discord():
              AND r.discord_channel_id IS NOT NULL"""
     )
     result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+# ── Account Linking ───────────────────────────────────────────────────────────
+
+def init_link_table(conn=None):
+    close = conn is None
+    if conn is None:
+        conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS link_codes (
+            code        TEXT PRIMARY KEY,
+            telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
+            created_at  TIMESTAMP DEFAULT NOW(),
+            used        BOOLEAN DEFAULT FALSE
+        )
+    """)
+    conn.commit()
+    if close:
+        conn.close()
+
+def create_link_code(telegram_id):
+    """Generate a one-time code for linking Telegram to Discord."""
+    import random, string
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    conn = get_conn()
+    c = conn.cursor()
+    # Delete any existing unused codes for this user
+    c.execute("DELETE FROM link_codes WHERE telegram_id=%s AND used=FALSE", (telegram_id,))
+    c.execute(
+        "INSERT INTO link_codes (code, telegram_id) VALUES (%s, %s)",
+        (code, telegram_id)
+    )
+    conn.commit()
+    conn.close()
+    return code
+
+def consume_link_code(code, discord_id, discord_username):
+    """
+    Attempt to link a Discord account using a code.
+    Returns (telegram_id, error_message).
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM link_codes WHERE code=%s AND used=FALSE",
+        (code.upper(),)
+    )
+    row = _row(c, c.fetchone())
+    if not row:
+        conn.close()
+        return None, "Invalid or expired code. Generate a new one with /linkdiscord on Telegram."
+
+    # Check not older than 10 minutes
+    from datetime import datetime, timezone, timedelta
+    created = row["created_at"]
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - created > timedelta(minutes=10):
+        conn.close()
+        return None, "Code has expired (10 min limit). Generate a new one with /linkdiscord on Telegram."
+
+    telegram_id = row["telegram_id"]
+
+    # Mark code used
+    c.execute("UPDATE link_codes SET used=TRUE WHERE code=%s", (code.upper(),))
+
+    # Link discord_id to all characters owned by this telegram_id
+    c.execute(
+        "UPDATE characters SET discord_id=%s WHERE telegram_id=%s",
+        (discord_id, telegram_id)
+    )
+
+    # Upsert discord user and link to telegram
+    c.execute(
+        """INSERT INTO discord_users (discord_id, username, telegram_id)
+           VALUES (%s, %s, %s)
+           ON CONFLICT (discord_id) DO UPDATE
+           SET username=EXCLUDED.username, telegram_id=EXCLUDED.telegram_id""",
+        (discord_id, discord_username, telegram_id)
+    )
+
+    conn.commit()
+    conn.close()
+    return telegram_id, None
+
+def get_link_status(telegram_id):
+    """Check if a Telegram user has a linked Discord account."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM discord_users WHERE telegram_id=%s",
+        (telegram_id,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+def get_discord_link_status(discord_id):
+    """Check if a Discord user has a linked Telegram account."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT du.*, u.username as tg_username FROM discord_users du "
+        "JOIN users u ON u.telegram_id=du.telegram_id "
+        "WHERE du.discord_id=%s AND du.telegram_id IS NOT NULL",
+        (discord_id,)
+    )
+    result = _row(c, c.fetchone())
     conn.close()
     return result
 # ── Teams ─────────────────────────────────────────────────────────────────────
