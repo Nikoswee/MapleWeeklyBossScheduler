@@ -127,6 +127,52 @@ class CancelButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(content="❌ Run creation cancelled.", view=None)
 
+
+async def _notify_unlinked_via_telegram(run_id, unlinked_members, run, data):
+    """Send Telegram DM invites to members who don't have Discord linked."""
+    import httpx
+    tg_token = os.environ.get("BOT_TOKEN")
+    if not tg_token:
+        return []
+
+    sgt      = get_run_dt(run) + timedelta(hours=8)
+    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
+    reminder_str = REMINDER_MAP.get(data.get("reminder_mins", 0), "No reminder")
+
+    notified = []
+    for m in unlinked_members:
+        # Get telegram_id from characters table
+        char = db.get_character_by_id(m["character_id"])
+        if not char or not char.get("telegram_id"):
+            continue
+        tg_id = char["telegram_id"]
+        if tg_id < 0:  # negative = discord-only user, no telegram
+            continue
+
+        invite_text = (
+            f"📨 You've been invited to a boss run (from Discord)!\n\n"
+            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+            f"📅 {time_str}\n"
+            f"⏰ Reminder: {reminder_str}\n\n"
+            f"Your character: {m['ign']}\n\n"
+            f"Reply with /accept {run_id} or /decline {run_id}"
+        )
+
+        try:
+            async with httpx.AsyncClient() as client_http:
+                resp = await client_http.post(
+                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                    json={"chat_id": tg_id, "text": invite_text}
+                )
+                if resp.status_code == 200:
+                    notified.append(m["ign"])
+                else:
+                    log.warning(f"Telegram notify failed for {m['ign']}: {resp.text}")
+        except Exception as e:
+            log.warning(f"Telegram notify error for {m['ign']}: {e}")
+
+    return notified
+
 # ── RSVP View ─────────────────────────────────────────────────────────────────
 
 class RSVPView(discord.ui.View):
@@ -190,6 +236,23 @@ async def handle_rsvp(interaction: discord.Interaction, run_id: int, accepted: i
         await _update_run_message(interaction.client, run, fmt_run_embed(run, members), view=None, content=cancel_text)
         await _post_to_runs_channel(interaction.client, f"{cancel_text}\n{mentions}")
         await interaction.followup.send(f"❌ You declined. Run #{run_id} cancelled.", ephemeral=True)
+
+
+class DatePickerPromptView(discord.ui.View):
+    """Shown after a warning when we can\'t directly open the modal."""
+    def __init__(self, run_data: dict):
+        super().__init__(timeout=300)
+        self.run_data = run_data
+
+    @discord.ui.button(label="📅 Set Date & Time", style=discord.ButtonStyle.primary)
+    async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.run_data["creator_id"]:
+            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True); return
+        await interaction.response.send_modal(DateTimeModal(self.run_data))
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="❌ Run creation cancelled.", view=None)
 
 # ── Date/time modal ────────────────────────────────────────────────────────────
 
@@ -377,8 +440,26 @@ class MemberSelectView(discord.ui.View):
     async def on_select(self, interaction: discord.Interaction):
         if interaction.user.id != self.run_data["creator_id"]:
             await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True); return
-        self.run_data["selected_chars"] = [int(v) for v in interaction.data["values"]]
-        await interaction.response.send_modal(DateTimeModal(self.run_data))
+        selected_ids = [int(v) for v in interaction.data["values"]]
+        self.run_data["selected_chars"] = selected_ids
+
+        # Check for unlinked members and warn creator
+        all_chars = db.get_all_characters_discord()
+        char_map  = {ch["id"]: ch for ch in all_chars}
+        unlinked  = [char_map[cid]["ign"] for cid in selected_ids if cid in char_map and not char_map[cid].get("discord_id")]
+        if unlinked:
+            warning = f"⚠️ **Heads up:** {', '.join(unlinked)} have no Discord account linked — they won't see the invite on Discord. They can still be notified via Telegram if accounts are linked."
+            await interaction.response.send_message(warning, ephemeral=True)
+            # Still open the modal after a short warning
+            await interaction.followup.send("Proceeding to date/time selection...", ephemeral=True)
+            # Can't send modal after send_message, so edit to show date picker via view
+            view = DatePickerPromptView(self.run_data)
+            await interaction.followup.send(
+                f"{progress_bar(4)}\n\nSet the date and time for this run:",
+                view=view, ephemeral=True
+            )
+        else:
+            await interaction.response.send_modal(DateTimeModal(self.run_data))
 
     async def _go_back(self, interaction: discord.Interaction):
         teams = db.get_all_teams()
@@ -473,7 +554,12 @@ class ConfirmRunView(discord.ui.View):
         members  = db.get_run_members_discord(run_id)
         embed    = fmt_run_embed(run, members)
         view     = RSVPView(run_id)
-        mentions = " ".join(f"<@{m['discord_id']}>" for m in members if m.get("discord_id"))
+
+        # Split members into Discord-linked and unlinked
+        linked   = [m for m in members if m.get("discord_id")]
+        unlinked = [m for m in members if not m.get("discord_id")]
+        mentions = " ".join(f"<@{m['discord_id']}>" for m in linked)
+
         ch_target = interaction.client.get_channel(RUNS_CHANNEL_ID) if RUNS_CHANNEL_ID else interaction.channel
         if ch_target:
             try:
@@ -482,10 +568,24 @@ class ConfirmRunView(discord.ui.View):
                     embed=embed, view=view
                 )
                 db.set_run_discord_message(run_id, msg.id, ch_target.id)
-                await interaction.edit_original_response(
-                    content=f"✅ **Run #{run_id} created and posted!** Check <#{ch_target.id}>.",
-                    view=None
-                )
+
+                # Build summary message
+                summary = f"✅ **Run #{run_id} created and posted!** Check <#{ch_target.id}>."
+
+                if unlinked:
+                    names = ", ".join(m["ign"] for m in unlinked)
+                    summary += (
+                        f"\n\n⚠️ **The following characters have no Discord account linked:**\n"
+                        f"{names}\n"
+                        f"They won't see this invite on Discord.\n"
+                        f"Ask them to link with `/linkaccount` or they can be invited via Telegram."
+                    )
+                    # Attempt to notify via Telegram for unlinked members
+                    tg_notified = await _notify_unlinked_via_telegram(run_id, unlinked, run, data)
+                    if tg_notified:
+                        summary += f"\n✅ Sent Telegram invite to: {', '.join(tg_notified)}"
+
+                await interaction.edit_original_response(content=summary, view=None)
             except discord.Forbidden:
                 await interaction.followup.send(
                     "⚠️ Bot lacks permission to post in the runs channel.\n"
