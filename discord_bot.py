@@ -231,18 +231,37 @@ async def _notify_via_telegram(run_id, members, run, data):
 
 # ── RSVP View ─────────────────────────────────────────────────────────────────
 
+def make_rsvp_view(run_id: int) -> discord.ui.View:
+    """Create an RSVP view with run_id encoded in custom_ids for persistence."""
+    view = discord.ui.View(timeout=None)
+
+    accept_btn  = discord.ui.Button(
+        label="✅ Accept", style=discord.ButtonStyle.success,
+        custom_id=f"rsvp_accept_{run_id}"
+    )
+    decline_btn = discord.ui.Button(
+        label="❌ Decline", style=discord.ButtonStyle.danger,
+        custom_id=f"rsvp_decline_{run_id}"
+    )
+
+    async def on_accept(interaction: discord.Interaction):
+        await handle_rsvp(interaction, run_id, accepted=1)
+
+    async def on_decline(interaction: discord.Interaction):
+        await handle_rsvp(interaction, run_id, accepted=-1)
+
+    accept_btn.callback  = on_accept
+    decline_btn.callback = on_decline
+    view.add_item(accept_btn)
+    view.add_item(decline_btn)
+    return view
+
+# Keep RSVPView as alias for persistent view re-registration on restart
 class RSVPView(discord.ui.View):
     def __init__(self, run_id: int):
         super().__init__(timeout=None)
         self.run_id = run_id
-
-    @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success, custom_id="rsvp_accept")
-    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await handle_rsvp(interaction, self.run_id, accepted=1)
-
-    @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger, custom_id="rsvp_decline")
-    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await handle_rsvp(interaction, self.run_id, accepted=-1)
+        # Buttons registered dynamically via on_interaction
 
 async def handle_rsvp(interaction: discord.Interaction, run_id: int, accepted: int):
     await interaction.response.defer(ephemeral=True)
@@ -250,8 +269,25 @@ async def handle_rsvp(interaction: discord.Interaction, run_id: int, accepted: i
     run = db.get_run(run_id)
     if not run:
         await interaction.followup.send(f"⚠️ Run #{run_id} not found.", ephemeral=True); return
+    if run["status"] == "confirmed":
+        await interaction.followup.send(
+            f"ℹ️ Run #{run_id} is already confirmed — no further responses needed.",
+            ephemeral=True
+        )
+        return
     if run["status"] == "cancelled":
-        await interaction.followup.send(f"⚠️ Run #{run_id} has been cancelled.", ephemeral=True); return
+        # Try to remove buttons from the channel message if still showing
+        try:
+            cancelled_embed = fmt_run_embed(run, db.get_run_members_discord(run_id))
+            cancelled_embed.set_footer(text="❌ This run has been cancelled")
+            await _update_run_message(interaction.client, run, cancelled_embed, view=None)
+        except Exception:
+            pass
+        await interaction.followup.send(
+            f"⚠️ Run #{run_id} has been cancelled. The run post has been updated.",
+            ephemeral=True
+        )
+        return
     rm = db.get_run_member_by_discord(run_id, interaction.user.id)
     if not rm:
         await interaction.followup.send("⚠️ You're not invited to this run.", ephemeral=True); return
@@ -271,16 +307,25 @@ async def handle_rsvp(interaction: discord.Interaction, run_id: int, accepted: i
             embed = fmt_run_embed(run, members)
             embed.title = f"🎉 Run #{run_id} CONFIRMED! — {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}"
             embed.color = discord.Color.green()
+            embed.set_footer(text="✅ All members confirmed — buttons removed")
             await _update_run_message(interaction.client, run, embed, view=None)
             mentions = " ".join(f"<@{m['discord_id']}>" for m in members if m.get("discord_id"))
             await _post_to_runs_channel(interaction.client, f"🎉 **Run #{run_id} is CONFIRMED!** {mentions}", embed=embed)
-            await interaction.followup.send("✅ You accepted! Run is confirmed — everyone notified.", ephemeral=True)
+            await interaction.followup.send(
+                f"✅ **Run #{run_id} is CONFIRMED!** All members accepted.\n"
+                f"_The run post has been updated. No further action needed._",
+                ephemeral=True
+            )
         else:
             pending        = [m for m in members if m["accepted"] == 0]
             accepted_count = sum(1 for m in members if m["accepted"] == 1)
-            await _update_run_message(interaction.client, run, fmt_run_embed(run, members))
+            updated_embed = fmt_run_embed(run, members)
+            updated_embed.set_footer(text=f"✅ {rm['ign']} just accepted · {accepted_count}/{len(members)} confirmed")
+            await _update_run_message(interaction.client, run, updated_embed, view=make_rsvp_view(run_id))
             await interaction.followup.send(
-                f"✅ Accepted! ({accepted_count}/{len(members)})\nStill waiting: {', '.join(m['ign'] for m in pending)}",
+                f"✅ **You accepted Run #{run_id}!** ({accepted_count}/{len(members)} confirmed)\n"
+                f"Still waiting on: {', '.join(m['ign'] for m in pending)}\n\n"
+                f"_Your response has been recorded. No need to click again._",
                 ephemeral=True
             )
     else:
@@ -296,7 +341,11 @@ async def handle_rsvp(interaction: discord.Interaction, run_id: int, accepted: i
         )
         await _update_run_message(interaction.client, run, fmt_run_embed(run, members), view=None, content=cancel_text)
         await _post_to_runs_channel(interaction.client, f"{cancel_text}\n{mentions}")
-        await interaction.followup.send(f"❌ You declined. Run #{run_id} cancelled.", ephemeral=True)
+        await interaction.followup.send(
+            f"❌ **You declined Run #{run_id}.** The run has been cancelled and all members notified.\n"
+            f"_The run post has been updated._",
+            ephemeral=True
+        )
 
 
 class DatePickerPromptView(discord.ui.View):
@@ -614,7 +663,7 @@ class ConfirmRunView(discord.ui.View):
         run      = db.get_run(run_id)
         members  = db.get_run_members_discord(run_id)
         embed    = fmt_run_embed(run, members)
-        view     = RSVPView(run_id)
+        view     = make_rsvp_view(run_id)
 
         # Split members into Discord-linked and unlinked
         linked   = [m for m in members if m.get("discord_id")]
@@ -684,7 +733,12 @@ class MapleBot(discord.Client):
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
         log.info(f"Slash commands synced to guild {DISCORD_GUILD_ID}")
-        self.add_view(RSVPView(run_id=0))
+        # Re-register persistent RSVP handlers for PENDING runs only on restart
+        active_runs = db.get_active_runs_discord()
+        pending_runs = [r for r in active_runs if r["status"] == "pending"]
+        for run in pending_runs:
+            self.add_view(make_rsvp_view(run["id"]))
+        log.info(f"Re-registered RSVP views for {len(pending_runs)} pending runs")
         scheduler_loop.start()
 
     async def on_ready(self):
@@ -925,7 +979,7 @@ async def slash_resendrun(interaction: discord.Interaction, run_id: int):
         client,
         f"📨 **Reminder — please respond to Run #{run_id}!** {mentions}",
         embed=fmt_run_embed(run, members),
-        view=RSVPView(run_id)
+        view=make_rsvp_view(run_id)
     )
     await interaction.response.send_message(f"✅ Resent to {len(pending)} pending member(s).", ephemeral=True)
 
