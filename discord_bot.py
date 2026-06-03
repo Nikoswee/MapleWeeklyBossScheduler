@@ -243,16 +243,28 @@ class DateTimeModal(discord.ui.Modal, title="Set Run Date & Time (SGT)"):
         self.run_data["run_at_iso"] = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         self.run_data["time_str"]   = sgt_dt.strftime("%d/%m/%Y %H:%M SGT")
 
-        # Show member selection
-        view = MemberSelectView(self.run_data)
-        await interaction.response.send_message(
-            f"⚔️ **Create a Boss Run**\n\n"
-            f"Boss: **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n"
-            f"Date: **{self.run_data['time_str']}**\n\n"
-            f"Select party members:",
-            view=view,
-            ephemeral=True
-        )
+        # If members already selected (from team), go to reminder
+        if self.run_data.get("selected_chars"):
+            view = ReminderSelectView(self.run_data)
+            await interaction.response.send_message(
+                f"⚔️ **Create a Boss Run**\n\n"
+                f"Boss: **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n"
+                f"Date: **{self.run_data['time_str']}**\n\n"
+                f"Set a reminder?",
+                view=view,
+                ephemeral=True
+            )
+        else:
+            # No members yet — show member picker
+            view = MemberSelectView(self.run_data)
+            await interaction.response.send_message(
+                f"⚔️ **Create a Boss Run**\n\n"
+                f"Boss: **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n"
+                f"Date: **{self.run_data['time_str']}**\n\n"
+                f"Select party members:",
+                view=view,
+                ephemeral=True
+            )
 
 class MemberSelectView(discord.ui.View):
     def __init__(self, run_data: dict):
@@ -279,19 +291,7 @@ class MemberSelectView(discord.ui.View):
     async def on_select(self, interaction: discord.Interaction):
         selected_ids = [int(v) for v in interaction.data["values"]]
         self.run_data["selected_chars"] = selected_ids
-
-        # Show reminder selection
-        view = ReminderSelectView(self.run_data)
-        await interaction.response.edit_message(
-            content=(
-                f"⚔️ **Create a Boss Run**\n\n"
-                f"Boss: **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n"
-                f"Date: **{self.run_data['time_str']}**\n"
-                f"Members: **{len(selected_ids)} selected**\n\n"
-                f"Set a reminder?"
-            ),
-            view=view
-        )
+        await interaction.response.send_modal(DateTimeModal(self.run_data))
 
 class ReminderSelectView(discord.ui.View):
     def __init__(self, run_data: dict):
@@ -621,7 +621,15 @@ class MethodSelectView(discord.ui.View):
     async def select_individual(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.run_data["creator_id"]:
             await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True); return
-        await interaction.response.send_modal(DateTimeModal(self.run_data))
+        view = MemberSelectView(self.run_data)
+        await interaction.response.edit_message(
+            content=(
+                f"⚔️ **Create a Boss Run**\n\n"
+                f"Boss: **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n"
+                f"Step 3 — Select party members:"
+            ),
+            view=view
+        )
 
 @client.tree.command(name="cancelrun", description="Cancel a boss run")
 @app_commands.describe(run_id="The run ID to cancel")
