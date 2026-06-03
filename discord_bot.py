@@ -128,50 +128,74 @@ class CancelButton(discord.ui.Button):
         await interaction.response.edit_message(content="❌ Run creation cancelled.", view=None)
 
 
-async def _notify_unlinked_via_telegram(run_id, unlinked_members, run, data):
-    """Send Telegram DM invites to members who don't have Discord linked."""
+async def _notify_via_telegram(run_id, members, run, data):
+    """Send Telegram DM invites to ALL members who have a Telegram account.
+    Works for both linked and unlinked members."""
     import httpx
     tg_token = os.environ.get("BOT_TOKEN")
     if not tg_token:
-        return []
+        return [], []
 
-    sgt      = get_run_dt(run) + timedelta(hours=8)
-    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
+    sgt          = get_run_dt(run) + timedelta(hours=8)
+    time_str     = sgt.strftime("%d/%m/%Y %H:%M SGT")
     reminder_str = REMINDER_MAP.get(data.get("reminder_mins", 0), "No reminder")
 
+    # Build accept/decline buttons for Telegram
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    invite_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Accept",  callback_data=f"rsvp_accept_{run_id}"),
+        InlineKeyboardButton("❌ Decline", callback_data=f"rsvp_decline_{run_id}"),
+    ]])
+
     notified = []
-    for m in unlinked_members:
-        # Get telegram_id from characters table
-        char = db.get_character_by_id(m["character_id"])
-        if not char or not char.get("telegram_id"):
+    skipped  = []
+
+    for m in members:
+        # Get the character to find telegram_id
+        char = db.get_character_by_id(m["character_id"] if "character_id" in m else m["id"])
+        if not char:
             continue
-        tg_id = char["telegram_id"]
-        if tg_id < 0:  # negative = discord-only user, no telegram
+        tg_id = char.get("telegram_id")
+        if not tg_id or tg_id < 0:
+            # Discord-only user, no Telegram
+            skipped.append(m["ign"])
             continue
 
         invite_text = (
-            f"📨 You've been invited to a boss run (from Discord)!\n\n"
+            f"📨 You've been invited to a boss run (via Discord)!\n\n"
             f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
             f"📅 {time_str}\n"
             f"⏰ Reminder: {reminder_str}\n\n"
             f"Your character: {m['ign']}\n\n"
-            f"Reply with /accept {run_id} or /decline {run_id}"
+            f"Tap below or reply /accept {run_id} or /decline {run_id}"
         )
 
         try:
             async with httpx.AsyncClient() as client_http:
                 resp = await client_http.post(
                     f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                    json={"chat_id": tg_id, "text": invite_text}
+                    json={
+                        "chat_id": tg_id,
+                        "text": invite_text,
+                        "reply_markup": {
+                            "inline_keyboard": [[
+                                {"text": "✅ Accept",  "callback_data": f"rsvp_accept_{run_id}"},
+                                {"text": "❌ Decline", "callback_data": f"rsvp_decline_{run_id}"}
+                            ]]
+                        }
+                    }
                 )
                 if resp.status_code == 200:
                     notified.append(m["ign"])
+                    log.info(f"Telegram DM sent to {m['ign']} (tg_id:{tg_id})")
                 else:
                     log.warning(f"Telegram notify failed for {m['ign']}: {resp.text}")
+                    skipped.append(m["ign"])
         except Exception as e:
             log.warning(f"Telegram notify error for {m['ign']}: {e}")
+            skipped.append(m["ign"])
 
-    return notified
+    return notified, skipped
 
 # ── RSVP View ─────────────────────────────────────────────────────────────────
 
@@ -569,21 +593,24 @@ class ConfirmRunView(discord.ui.View):
                 )
                 db.set_run_discord_message(run_id, msg.id, ch_target.id)
 
+                # Notify ALL members via Telegram too
+                tg_notified, tg_skipped = await _notify_via_telegram(run_id, members, run, data)
+
                 # Build summary message
                 summary = f"✅ **Run #{run_id} created and posted!** Check <#{ch_target.id}>."
+
+                if tg_notified:
+                    summary += f"\n📱 Telegram notified: {', '.join(tg_notified)}"
 
                 if unlinked:
                     names = ", ".join(m["ign"] for m in unlinked)
                     summary += (
-                        f"\n\n⚠️ **The following characters have no Discord account linked:**\n"
-                        f"{names}\n"
-                        f"They won't see this invite on Discord.\n"
-                        f"Ask them to link with `/linkaccount` or they can be invited via Telegram."
+                        f"\n\n⚠️ **No Discord link:** {names}\n"
+                        f"They can only accept/decline via Telegram."
                     )
-                    # Attempt to notify via Telegram for unlinked members
-                    tg_notified = await _notify_unlinked_via_telegram(run_id, unlinked, run, data)
-                    if tg_notified:
-                        summary += f"\n✅ Sent Telegram invite to: {', '.join(tg_notified)}"
+
+                if tg_skipped and not tg_notified:
+                    summary += f"\n\n💡 Tip: Members can link their Telegram with `/linkaccount` to receive cross-platform invites."
 
                 await interaction.edit_original_response(content=summary, view=None)
             except discord.Forbidden:
