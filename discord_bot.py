@@ -80,6 +80,30 @@ def fmt_runs_grouped_embeds(runs):
     confirmed = [r for r in runs if r["status"] == "confirmed"]
     return [fmt_run_embed(r, db.get_run_members_discord(r["id"])) for r in confirmed + pending]
 
+async def _update_telegram_invite(run_id, telegram_id, ign, accepted, run):
+    """Send a follow-up Telegram message removing the buttons after Discord response."""
+    import httpx
+    tg_token = os.environ.get("BOT_TOKEN")
+    if not tg_token or not telegram_id or telegram_id < 0:
+        return
+    sgt      = get_run_dt(run) + timedelta(hours=8)
+    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
+    status   = "✅ accepted" if accepted == 1 else "❌ declined"
+    msg = (
+        f"ℹ️ Your response has been recorded via Discord.\n\n"
+        f"You {status} Run #{run_id}\n"
+        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+        f"📅 {time_str}"
+    )
+    try:
+        async with httpx.AsyncClient() as c:
+            await c.post(
+                f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                json={"chat_id": telegram_id, "text": msg}
+            )
+    except Exception as e:
+        log.warning(f"Telegram update failed for {ign}: {e}")
+
 async def _post_to_runs_channel(bot, content, embed=None, view=None):
     if RUNS_CHANNEL_ID:
         ch = bot.get_channel(RUNS_CHANNEL_ID)
@@ -234,6 +258,11 @@ async def handle_rsvp(interaction: discord.Interaction, run_id: int, accepted: i
 
     db.set_member_response(run_id, rm["character_id"], accepted)
     members = db.get_run_members_discord(run_id)
+
+    # Notify via Telegram that response was recorded (removes button context)
+    char = db.get_character_by_id(rm["character_id"])
+    if char and char.get("telegram_id") and char["telegram_id"] > 0:
+        await _update_telegram_invite(run_id, char["telegram_id"], rm["ign"], accepted, run)
 
     if accepted == 1:
         all_confirmed = db.check_and_confirm_run(run_id)
