@@ -1389,6 +1389,17 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ch, rm = matched
     log.info(f"RSVP: matched {ch['ign']} | current accepted={rm['accepted']}")
 
+    # Already responded — show status and remove buttons
+    if rm["accepted"] != 0:
+        status_map = {1: "✅ accepted", -1: "❌ declined"}
+        status = status_map.get(rm["accepted"], "responded")
+        await query.edit_message_text(
+            f"ℹ️ You already {status} Run #{run_id}.\n\n"
+            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n\n"
+            f"If you need to change your response, contact the run leader."
+        )
+        return
+
     db.set_member_response(run_id, ch["id"], accepted)
     members  = db.get_run_members(run_id)
     sgt      = get_run_dt(run) + timedelta(hours=8)
