@@ -161,13 +161,21 @@ async def _notify_via_telegram(run_id, members, run, data):
             skipped.append(m["ign"])
             continue
 
+        # Build full party list for context
+        all_members = db.get_run_members_discord(run_id)
+        party_lines = "\n".join(
+            f"  {'✅' if mbr['accepted']==1 else '⏳' if mbr['accepted']==0 else '❌'} {mbr['ign']}"
+            for mbr in all_members
+        )
+
         invite_text = (
             f"📨 You've been invited to a boss run (via Discord)!\n\n"
             f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
             f"📅 {time_str}\n"
             f"⏰ Reminder: {reminder_str}\n\n"
             f"Your character: {m['ign']}\n\n"
-            f"Tap below or reply /accept {run_id} or /decline {run_id}"
+            f"👥 Party:\n{party_lines}\n\n"
+            f"Tap the buttons below to respond:"
         )
 
         try:
