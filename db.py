@@ -78,6 +78,8 @@ def init_db():
 
     # Create teams tables
     init_teams_table(conn)
+    # Create discord tables
+    init_discord_tables(conn)
 
     # Sync bosses — only add new ones, never delete (runs may reference old IDs)
     for name, difficulties in BOSSES:
@@ -425,6 +427,240 @@ def reset_run_members(run_id, new_char_ids):
     conn.commit()
     conn.close()
 
+
+# ── Discord Users ─────────────────────────────────────────────────────────────
+
+def init_discord_tables(conn=None):
+    close = conn is None
+    if conn is None:
+        conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS discord_users (
+            discord_id   BIGINT PRIMARY KEY,
+            username     TEXT,
+            telegram_id  BIGINT REFERENCES users(telegram_id) DEFAULT NULL
+        )
+    """)
+    # Add discord_id column to characters if not exists
+    c.execute("""
+        ALTER TABLE characters
+        ADD COLUMN IF NOT EXISTS discord_id BIGINT DEFAULT NULL
+    """)
+    # Add discord_message_id to runs for editing the invite message
+    c.execute("""
+        ALTER TABLE runs
+        ADD COLUMN IF NOT EXISTS discord_message_id BIGINT DEFAULT NULL
+    """)
+    c.execute("""
+        ALTER TABLE runs
+        ADD COLUMN IF NOT EXISTS discord_channel_id BIGINT DEFAULT NULL
+    """)
+    conn.commit()
+    if close:
+        conn.close()
+
+def upsert_discord_user(discord_id, username):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO discord_users (discord_id, username)
+           VALUES (%s, %s)
+           ON CONFLICT (discord_id) DO UPDATE SET username=EXCLUDED.username""",
+        (discord_id, username)
+    )
+    conn.commit()
+    conn.close()
+
+def add_character_discord(discord_id, ign, cls=None, level=None):
+    """Register a character linked to a Discord user."""
+    conn = get_conn()
+    c = conn.cursor()
+    # Ensure discord user exists in users table too
+    c.execute(
+        """INSERT INTO users (telegram_id, username)
+           VALUES (%s, %s)
+           ON CONFLICT (telegram_id) DO NOTHING""",
+        (-discord_id, f"discord:{discord_id}")
+    )
+    try:
+        c.execute(
+            """INSERT INTO characters (telegram_id, ign, class, level, discord_id)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (-discord_id, ign, cls, level, discord_id)
+        )
+        conn.commit()
+        return True
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def get_characters_discord(discord_id):
+    """Get characters registered by a Discord user."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM characters WHERE discord_id=%s ORDER BY ign",
+        (discord_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+def get_character_by_ign_discord(ign):
+    """Get character with discord_id info."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ch.*, du.discord_id as owner_discord_id, du.username as discord_username
+           FROM characters ch
+           LEFT JOIN discord_users du ON du.discord_id=ch.discord_id
+           WHERE LOWER(ch.ign)=LOWER(%s)""",
+        (ign,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+def get_all_characters_discord():
+    """All characters with discord info."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ch.*,
+                  du.discord_id as owner_discord_id,
+                  du.username as discord_username
+           FROM characters ch
+           LEFT JOIN discord_users du ON du.discord_id=ch.discord_id
+           ORDER BY ch.ign"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+def set_run_discord_message(run_id, message_id, channel_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE runs SET discord_message_id=%s, discord_channel_id=%s WHERE id=%s",
+        (message_id, channel_id, run_id)
+    )
+    conn.commit()
+    conn.close()
+
+def get_run_members_discord(run_id):
+    """Run members with discord IDs for mentions."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT rm.*, ch.ign, ch.class, ch.level,
+                  ch.discord_id, du.username as discord_username
+           FROM run_members rm
+           JOIN characters ch ON ch.id=rm.character_id
+           LEFT JOIN discord_users du ON du.discord_id=ch.discord_id
+           WHERE rm.run_id=%s
+           ORDER BY ch.ign""",
+        (run_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+def get_run_member_by_discord(run_id, discord_id):
+    """Find a run member by discord_id."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT rm.*, ch.ign FROM run_members rm
+           JOIN characters ch ON ch.id=rm.character_id
+           WHERE rm.run_id=%s AND ch.discord_id=%s
+           LIMIT 1""",
+        (run_id, discord_id)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+def get_user_runs_discord(discord_id):
+    """Runs where this Discord user's characters are invited."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT DISTINCT r.*, b.name AS boss_name, b.difficulty,
+                  u.username AS leader_username, r.discord_message_id, r.discord_channel_id
+           FROM runs r
+           JOIN bosses      b  ON b.id=r.boss_id
+           JOIN users       u  ON u.telegram_id=r.leader_id
+           JOIN run_members rm ON rm.run_id=r.id
+           JOIN characters  ch ON ch.id=rm.character_id
+           WHERE ch.discord_id=%s
+             AND r.status != 'cancelled'
+             AND r.run_at > NOW()
+           ORDER BY r.run_at""",
+        (discord_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+def get_active_runs_discord():
+    """All active runs with discord message info."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT r.*, b.name AS boss_name, b.difficulty,
+                  u.username AS leader_username,
+                  r.discord_message_id, r.discord_channel_id
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           JOIN users  u ON u.telegram_id=r.leader_id
+           WHERE r.status != 'cancelled'
+             AND r.run_at > NOW()
+           ORDER BY r.run_at"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+def create_run_discord(boss_id, discord_id, run_at_iso):
+    """Create a run from Discord (leader_id stored as negative discord_id)."""
+    conn = get_conn()
+    c = conn.cursor()
+    # Ensure user exists in users table
+    c.execute(
+        "INSERT INTO users (telegram_id, username) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (-discord_id, f"discord:{discord_id}")
+    )
+    c.execute(
+        "INSERT INTO runs (boss_id, leader_id, run_at) VALUES (%s,%s,%s) RETURNING id",
+        (boss_id, -discord_id, run_at_iso)
+    )
+    run_id = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return run_id
+
+def get_runs_due_for_reminder_discord():
+    """Confirmed runs with discord channel info due for reminder."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT r.*, b.name AS boss_name, b.difficulty,
+                  r.discord_channel_id
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           WHERE r.status='confirmed'
+             AND r.remind_at IS NOT NULL
+             AND r.remind_at <= NOW()
+             AND r.remind_at > NOW() - INTERVAL '30 minutes'
+             AND r.run_at > NOW()
+             AND r.discord_channel_id IS NOT NULL"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
 # ── Teams ─────────────────────────────────────────────────────────────────────
 
 def init_teams_table(conn=None):
