@@ -635,17 +635,29 @@ def get_active_runs_discord():
     return result
 
 def create_run_discord(boss_id, discord_id, run_at_iso):
-    """Create a run from Discord (leader_id stored as negative discord_id)."""
+    """Create a run from Discord.
+    Uses real telegram_id if Discord account is linked, otherwise placeholder."""
     conn = get_conn()
     c = conn.cursor()
-    # Ensure user exists in users table
+
+    # Check if linked to Telegram
     c.execute(
-        "INSERT INTO users (telegram_id, username) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-        (-discord_id, f"discord:{discord_id}")
+        "SELECT telegram_id FROM discord_users WHERE discord_id=%s AND telegram_id IS NOT NULL AND telegram_id > 0",
+        (discord_id,)
     )
+    row = c.fetchone()
+    owner_tid = row[0] if row else -discord_id
+
+    if owner_tid < 0:
+        # No link — ensure placeholder user exists
+        c.execute(
+            "INSERT INTO users (telegram_id, username) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (owner_tid, f"discord:{discord_id}")
+        )
+
     c.execute(
         "INSERT INTO runs (boss_id, leader_id, run_at) VALUES (%s,%s,%s) RETURNING id",
-        (boss_id, -discord_id, run_at_iso)
+        (boss_id, owner_tid, run_at_iso)
     )
     run_id = c.fetchone()[0]
     conn.commit()
