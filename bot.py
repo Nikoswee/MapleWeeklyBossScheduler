@@ -286,6 +286,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/resendrun <run_id> — resend invites to pending\n"
         "/myruns — your invitations\n"
         "/runs — all upcoming runs\n\n"
+        "Discord:\n"
+        "/linkdiscord — generate a code to link Discord account\n"
+        "/linkstatus — check link status\n\n"
         "All times SGT (UTC+8)"
     )
 
@@ -1455,6 +1458,30 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 log.warning(f"Group decline cancel notify failed: {e}")
         log.info(f"Run #{run_id} auto-cancelled due to decline by {ch['ign']}")
 
+
+async def cmd_linkdiscord(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db.upsert_user(update.effective_user.id, update.effective_user.username or "")
+    code = db.create_link_code(update.effective_user.id)
+    await update.message.reply_text(
+        f"🔗 Link your Discord account\n\n"
+        f"Your one-time code: {code}\n\n"
+        f"On Discord, type:\n"
+        f"/linkaccount {code}\n\n"
+        f"⚠️ This code expires in 10 minutes.\n"
+        f"Once linked, your characters will be accessible on both platforms."
+    )
+
+async def cmd_linkstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    linked = db.get_link_status(update.effective_user.id)
+    if linked:
+        await update.message.reply_text(
+            f"✅ Your Telegram is linked to Discord account @{linked['username']} (ID: {linked['discord_id']})"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ No Discord account linked yet.\nUse /linkdiscord to generate a linking code."
+        )
+
 # ── /cancelrun ────────────────────────────────────────────────────────────────
 
 async def cmd_cancelrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1675,7 +1702,9 @@ def main():
     app.add_handler(CommandHandler("runs",       cmd_runs))
     app.add_handler(CommandHandler("teams",      cmd_teams))
     app.add_handler(CommandHandler("deleteteam", cmd_deleteteam))
-    app.add_handler(CommandHandler("chatid",     cmd_chatid))
+    app.add_handler(CommandHandler("linkdiscord", cmd_linkdiscord))
+    app.add_handler(CommandHandler("linkstatus",  cmd_linkstatus))
+    app.add_handler(CommandHandler("chatid",      cmd_chatid))
     app.add_handler(CommandHandler("version",    cmd_version))
 
     async def on_startup(app: Application):
