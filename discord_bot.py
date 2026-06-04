@@ -80,6 +80,44 @@ def fmt_runs_grouped_embeds(runs):
     confirmed = [r for r in runs if r["status"] == "confirmed"]
     return [fmt_run_embed(r, db.get_run_members_discord(r["id"])) for r in confirmed + pending]
 
+
+async def _send_telegram(telegram_id: int, text: str, run_id: int = None):
+    """Send a Telegram DM from the Discord bot via Bot API."""
+    import httpx
+    tg_token = os.environ.get("BOT_TOKEN")
+    if not tg_token or not telegram_id or telegram_id < 0:
+        return False
+    payload = {"chat_id": telegram_id, "text": text}
+    if run_id:
+        payload["reply_markup"] = {
+            "inline_keyboard": [[
+                {"text": "✅ Accept",  "callback_data": f"rsvp_accept_{run_id}"},
+                {"text": "❌ Decline", "callback_data": f"rsvp_decline_{run_id}"}
+            ]]
+        }
+    try:
+        async with httpx.AsyncClient() as c:
+            resp = await c.post(
+                f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                json=payload
+            )
+            return resp.status_code == 200
+    except Exception as e:
+        log.warning(f"Telegram send failed (id:{telegram_id}): {e}")
+        return False
+
+async def _notify_all_via_telegram(run_id: int, members, run, text: str, include_buttons=False):
+    """Send Telegram DMs to all members who have telegram_id."""
+    notified = []
+    for m in members:
+        char = db.get_character_by_id(m.get("character_id") or m.get("id"))
+        if not char: continue
+        tg_id = char.get("telegram_id")
+        if not tg_id or tg_id < 0: continue
+        ok = await _send_telegram(tg_id, text, run_id if include_buttons else None)
+        if ok: notified.append(m["ign"])
+    return notified
+
 async def _update_telegram_invite(run_id, telegram_id, ign, accepted, run):
     """Send a follow-up Telegram message removing the buttons after Discord response."""
     import httpx
@@ -311,6 +349,15 @@ async def handle_rsvp(interaction: discord.Interaction, run_id: int, accepted: i
             await _update_run_message(interaction.client, run, embed, view=None)
             mentions = " ".join(f"<@{m['discord_id']}>" for m in members if m.get("discord_id"))
             await _post_to_runs_channel(interaction.client, f"🎉 **Run #{run_id} is CONFIRMED!** {mentions}", embed=embed)
+            # Notify Telegram members
+            sgt_c    = get_run_dt(run) + timedelta(hours=8)
+            tg_msg_c = (
+                f"🎉 Run #{run_id} is CONFIRMED! All members accepted.\n\n"
+                f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+                f"📅 {sgt_c.strftime('%d/%m/%Y %H:%M SGT')}\n\n"
+                f"See you there!"
+            )
+            await _notify_all_via_telegram(run_id, members, run, tg_msg_c)
             await interaction.followup.send(
                 f"✅ **Run #{run_id} is CONFIRMED!** All members accepted.\n"
                 f"_The run post has been updated. No further action needed._",
@@ -341,6 +388,14 @@ async def handle_rsvp(interaction: discord.Interaction, run_id: int, accepted: i
         )
         await _update_run_message(interaction.client, run, fmt_run_embed(run, members), view=None, content=cancel_text)
         await _post_to_runs_channel(interaction.client, f"{cancel_text}\n{mentions}")
+        # Notify Telegram members
+        tg_decline_msg = (
+            f"❌ Run #{run_id} has been cancelled.\n\n"
+            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+            f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}\n"
+            f"{rm['ign']} declined on Discord."
+        )
+        await _notify_all_via_telegram(run_id, members, run, tg_decline_msg)
         await interaction.followup.send(
             f"❌ **You declined Run #{run_id}.** The run has been cancelled and all members notified.\n"
             f"_The run post has been updated._",
@@ -959,6 +1014,14 @@ async def slash_cancelrun(interaction: discord.Interaction, run_id: int):
     )
     await _update_run_message(client, run, fmt_run_embed(run, members), view=None, content=cancel_text)
     await _post_to_runs_channel(client, f"{cancel_text}\n{mentions}")
+    # Notify Telegram members
+    tg_cancel_msg = (
+        f"❌ Run #{run_id} has been cancelled.\n\n"
+        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+        f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}\n"
+        f"Cancelled by {interaction.user.name} on Discord."
+    )
+    await _notify_all_via_telegram(run_id, members, run, tg_cancel_msg)
     await interaction.response.send_message(f"🗑️ Run #{run_id} cancelled.", ephemeral=True)
 
 @client.tree.command(name="resendrun", description="Repost run invite for pending members")
@@ -1100,6 +1163,16 @@ async def send_reminders():
                     )
                 except Exception as e:
                     log.warning(f"Reminder failed: {e}")
+        # Also send Telegram DMs for this reminder
+        try:
+            tg_reminder_msg = (
+                f"⏰ Boss Run Reminder!\n\n"
+                f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+                f"📅 Starting at {sgt.strftime('%d/%m/%Y %H:%M SGT')}"
+            )
+            await _notify_all_via_telegram(run["id"], members, run, tg_reminder_msg)
+        except Exception as e:
+            log.warning(f"Telegram reminder DMs failed: {e}")
 
 async def auto_cancel_pending():
     for run in db.get_expired_pending_runs(hours=12):
@@ -1122,6 +1195,14 @@ async def auto_cancel_pending():
                     await ch.send(f"{msg}\n{mentions}")
                 except Exception as e:
                     log.warning(f"Auto-cancel failed: {e}")
+        # Notify Telegram members
+        tg_auto_msg = (
+            f"⏰ Run #{run['id']} auto-cancelled — no response within 12 hours.\n\n"
+            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+            f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}\n"
+            f"No response from: {', '.join(m['ign'] for m in pending)}"
+        )
+        await _notify_all_via_telegram(run["id"], members, run, tg_auto_msg)
         log.info(f"Auto-cancelled run #{run['id']}")
 
 @scheduler_loop.before_loop
