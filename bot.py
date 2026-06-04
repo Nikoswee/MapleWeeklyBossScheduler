@@ -804,6 +804,35 @@ async def _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute
     if failed:
         summary += f"\n⚠️ Couldn't DM: {', '.join(failed)} — they need to send /start to the bot first."
     await ctx.bot.send_message(chat_id=chat_id, text=summary)
+    # Notify Discord channel
+    try:
+        run_obj         = db.get_run(run_id)
+        discord_members = db.get_run_members_discord(run_id)
+        embed           = _build_discord_embed(run_obj, discord_members)
+        sgt_dt          = datetime(y, mo, d, hour, minute, tzinfo=timezone(timedelta(hours=8)))
+        time_str_dc     = sgt_dt.strftime("%d/%m/%Y %H:%M SGT")
+        verb            = "Updated" if is_edit else "New"
+        mentions        = " ".join(f"<@{m['discord_id']}>" for m in discord_members if m.get("discord_id"))
+        reminder_str    = f"⏰ Reminder: {get_reminder_str(reminder_mins)}"
+        dc_msg = (
+            f"📢 **{verb} Boss Run!** {mentions}\n"
+            f"⚔️ {diff_icon(difficulty)} **{boss_name} {difficulty}**\n"
+            f"📅 {time_str_dc}\n{reminder_str}\n"
+            f"Accept or decline in this channel:"
+        )
+        if is_edit:
+            # Update existing Discord post if it exists
+            await _update_discord_run_message(run_obj, embed)
+            await _notify_discord_channel(run_obj, discord_members,
+                f"✏️ **Run #{run_id} has been updated!**\n"
+                f"⚔️ {diff_icon(difficulty)} **{boss_name} {difficulty}**\n"
+                f"📅 {time_str_dc}\nAll responses reset — please re-accept."
+            )
+        else:
+            # New run — post to Discord channel with RSVP buttons via Discord bot API
+            await _notify_discord_channel(run_obj, discord_members, dc_msg)
+    except Exception as e:
+        log.warning(f"Discord notify_run failed: {e}")
 
 
 # ── Teams helpers ─────────────────────────────────────────────────────────────
@@ -1432,6 +1461,15 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, is_topic_message=bool(GROUP_THREAD_ID), text=confirm_msg)
                 except Exception as e:
                     log.warning(f"Group confirm failed: {e}")
+            # Update Discord post
+            try:
+                embed = _build_discord_embed(run, members)
+                embed["title"] = f"🎉 Run #{run_id} CONFIRMED! — {run['boss_name']} {run['difficulty']}"
+                embed["footer"] = {"text": "✅ All members confirmed"}
+                await _update_discord_run_message(run, embed)
+                await _notify_discord_channel(run, members, f"🎉 **Run #{run_id} is CONFIRMED!** All members accepted.")
+            except Exception as e:
+                log.warning(f"Discord confirm update failed: {e}")
         else:
             pending = [m for m in members if m["accepted"] == 0]
             total   = len(members)
@@ -1453,6 +1491,11 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as e:
                 log.warning(f"Leader notify failed: {e}")
+            # Update Discord post with new acceptance status
+            try:
+                await _update_discord_run_message(run, _build_discord_embed(run, members))
+            except Exception as e:
+                log.warning(f"Discord partial accept update failed: {e}")
     else:
         # Auto-cancel the run when anyone declines
         db.cancel_run(run_id)
@@ -1483,6 +1526,23 @@ async def rsvp_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 log.warning(f"Group decline cancel notify failed: {e}")
         log.info(f"Run #{run_id} auto-cancelled due to decline by {ch['ign']}")
+        # Update Discord post
+        try:
+            run_data = db.get_run(run_id)
+            discord_members = db.get_run_members_discord(run_id)
+            embed = _build_discord_embed(run_data, discord_members)
+            embed["footer"] = {"text": f"❌ Cancelled — {ch['ign']} declined"}
+            await _update_discord_run_message(run_data, embed)
+            sgt = get_run_dt(run_data) + timedelta(hours=8)
+            cancel_notice = (
+                f"❌ **Run #{run_id} has been cancelled.**\n"
+                f"⚔️ {diff_icon(run_data['difficulty'])} {run_data['boss_name']} {run_data['difficulty']}\n"
+                f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}\n"
+                f"{ch['ign']} (@{update.effective_user.username or ''}) declined on Telegram."
+            )
+            await _notify_discord_channel(run_data, discord_members, cancel_notice)
+        except Exception as e:
+            log.warning(f"Discord decline update failed: {e}")
 
 
 async def cmd_linkdiscord(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1508,6 +1568,87 @@ async def cmd_linkstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "❌ No Discord account linked yet.\nUse /linkdiscord to generate a linking code."
         )
 
+
+# ── Cross-platform Discord notification helpers ───────────────────────────────
+
+import httpx as _httpx
+
+DISCORD_TOKEN_ENV   = os.environ.get("DISCORD_TOKEN")
+RUNS_CHANNEL_ID_ENV = os.environ.get("RUNS_CHANNEL_ID")
+
+async def _discord_api(method, endpoint, **kwargs):
+    """Make a Discord API call from the Telegram bot."""
+    if not DISCORD_TOKEN_ENV:
+        return None
+    try:
+        async with _httpx.AsyncClient() as c:
+            resp = await getattr(c, method)(
+                f"https://discord.com/api/v10{endpoint}",
+                headers={"Authorization": f"Bot {DISCORD_TOKEN_ENV}", "Content-Type": "application/json"},
+                **kwargs
+            )
+            if resp.status_code in (200, 204):
+                return resp.json() if resp.content else True
+            log.warning(f"Discord API {endpoint}: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        log.warning(f"Discord API error {endpoint}: {e}")
+    return None
+
+async def _notify_discord_channel(run, members, message):
+    """Post a message to the Discord runs channel."""
+    if not RUNS_CHANNEL_ID_ENV:
+        return
+    mentions = " ".join(
+        f"<@{m['discord_id']}>" for m in members if m.get("discord_id")
+    )
+    text = f"{message}\n{mentions}" if mentions else message
+    await _discord_api("post", f"/channels/{RUNS_CHANNEL_ID_ENV}/messages",
+                       json={"content": text})
+
+async def _update_discord_run_message(run, embed_dict):
+    """Edit the Discord run post embed."""
+    msg_id = run.get("discord_message_id")
+    ch_id  = run.get("discord_channel_id")
+    if not msg_id or not ch_id:
+        return
+    await _discord_api("patch", f"/channels/{ch_id}/messages/{msg_id}",
+                       json={"embeds": [embed_dict], "components": []})
+
+def _build_discord_embed(run, members):
+    """Build a Discord embed dict for a run."""
+    from datetime import datetime, timezone, timedelta
+    run_dt = run["run_at"]
+    if isinstance(run_dt, str):
+        run_dt = datetime.fromisoformat(run_dt)
+    if run_dt.tzinfo is None:
+        run_dt = run_dt.replace(tzinfo=timezone.utc)
+    sgt      = run_dt + timedelta(hours=8)
+    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
+    color_map = {"confirmed": 0x57F287, "pending": 0xFEE75C, "cancelled": 0xED4245}
+    color = color_map.get(run.get("status", "pending"), 0x5865F2)
+    total    = len(members) if members else 0
+    accepted = sum(1 for m in members if m.get("accepted") == 1) if members else 0
+    party_lines = []
+    if members:
+        for m in members:
+            icon = {1: "✅", -1: "❌", 0: "⏳"}.get(m.get("accepted", 0), "⏳")
+            line = f"{icon} **{m['ign']}**"
+            if m.get("discord_id"): line += f" (<@{m['discord_id']}>)"
+            party_lines.append(line)
+    status_map = {"confirmed": "✅ CONFIRMED", "pending": "⏳ PENDING", "cancelled": "❌ CANCELLED"}
+    diff_emoji = {"easy":"🟢","normal":"🔵","hard":"🟠","chaos":"🔴","extreme":"⚫"}
+    icon = diff_emoji.get(run.get("difficulty","").lower(), "⚪")
+    return {
+        "title": f"⚔️ Run #{run['id']} — {icon} {run.get('boss_name','')} {run.get('difficulty','')}",
+        "color": color,
+        "fields": [
+            {"name": "📅 Date & Time", "value": time_str, "inline": True},
+            {"name": "👑 Leader",      "value": f"@{run.get('leader_username','')}", "inline": True},
+            {"name": "📋 Status",      "value": status_map.get(run.get("status",""), "UNKNOWN"), "inline": True},
+            {"name": f"👥 Party ({accepted}/{total})", "value": "\n".join(party_lines) or "None", "inline": False},
+        ]
+    }
+
 # ── /cancelrun ────────────────────────────────────────────────────────────────
 
 async def cmd_cancelrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1525,6 +1666,7 @@ async def cmd_cancelrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if run["status"] == "cancelled":
         await update.message.reply_text("ℹ️ Already cancelled."); return
     db.cancel_run(run_id)
+    run     = db.get_run(run_id)
     members = db.get_run_members(run_id)
     for m in members:
         try:
@@ -1538,6 +1680,22 @@ async def cmd_cancelrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             log.warning(f"Cancel notify failed {m['ign']}: {e}")
+    # Update Discord post
+    try:
+        discord_members = db.get_run_members_discord(run_id)
+        embed = _build_discord_embed(run, discord_members)
+        embed["footer"] = {"text": f"❌ Cancelled by @{update.effective_user.username or ''}"}
+        await _update_discord_run_message(run, embed)
+        sgt = get_run_dt(run) + timedelta(hours=8)
+        await _notify_discord_channel(
+            run, discord_members,
+            f"❌ **Run #{run_id} has been cancelled.**\n"
+            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
+            f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}\n"
+            f"Cancelled by @{update.effective_user.username or ''}."
+        )
+    except Exception as e:
+        log.warning(f"Discord cancel update failed: {e}")
     await update.message.reply_text(f"🗑️ Run #{run_id} cancelled and members notified.")
 
 # ── /myruns & /runs ───────────────────────────────────────────────────────────
@@ -1603,6 +1761,17 @@ async def send_reminders(app: Application):
                 await app.bot.send_message(chat_id=GROUP_CHAT_ID, message_thread_id=GROUP_THREAD_ID, is_topic_message=bool(GROUP_THREAD_ID), text=msg)
             except Exception as e:
                 log.warning(f"Group reminder failed: {e}")
+        # Also notify Discord channel
+        try:
+            discord_members = db.get_run_members_discord(run["id"])
+            reminder_notice = (
+                f"⏰ **Boss Run Reminder!**\n"
+                f"⚔️ {diff_icon(run['difficulty'])} **{run['boss_name']} {run['difficulty']}**\n"
+                f"📅 Starting at **{time_str}**"
+            )
+            await _notify_discord_channel(run, discord_members, reminder_notice)
+        except Exception as e:
+            log.warning(f"Discord reminder failed: {e}")
 
 async def auto_cancel_pending_runs(app: Application):
     expired = db.get_expired_pending_runs(hours=12)
