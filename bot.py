@@ -727,7 +727,7 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"🎉 Run #{run_id} created! Notifying members...")
     await _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute,
                       reminder_mins, update.effective_user.username or str(update.effective_user.id),
-                      update.effective_chat.id, is_edit=False)
+                      update.effective_user.id, is_edit=False)
     ctx.user_data.clear()
     return ConversationHandler.END
 
@@ -1251,7 +1251,7 @@ async def _apply_datetime_edit(query, ctx):
         f"Run reset to PENDING — members need to re-accept."
     )
     await _notify_run(ctx, run_id, run["boss_name"], run["difficulty"],
-                      y, mo, d, hour, minute, 0, leader, query.message.chat_id, is_edit=True)
+                      y, mo, d, hour, minute, 0, leader, query.from_user.id, is_edit=True)
     ctx.user_data.clear()
     return ConversationHandler.END
 
@@ -1316,7 +1316,7 @@ async def _apply_members_edit(query, ctx):
     )
     await _notify_run(ctx, run_id, run["boss_name"], run["difficulty"],
                       sgt.year, sgt.month, sgt.day, sgt.hour, sgt.minute,
-                      0, leader, query.message.chat_id, is_edit=True)
+                      0, leader, query.from_user.id, is_edit=True)
     ctx.user_data.clear()
     return ConversationHandler.END
 
