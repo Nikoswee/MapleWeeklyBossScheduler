@@ -905,7 +905,7 @@ async def slash_help(interaction: discord.Interaction):
         "📋 **All Commands**\n\n"
         "**Account**\n"
         "`/start` `/register` `/chars` `/allchars`\n"
-        "`/linkaccount <code>` — link to Telegram account\n"
+        "`/linkaccount <code>` — link to Telegram account, generate code through telegram -> /linkdiscord\n"
         "`/linkstatus` — check link status\n\n"
         "**Preset Teams**\n"
         "`/createteam` `/teams` `/editteam` `/deleteteam`\n\n"
