@@ -825,21 +825,39 @@ class MapleBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        guild = discord.Object(id=DISCORD_GUILD_ID)
-        self.tree.copy_global_to(guild=guild)
-        await self.tree.sync(guild=guild)
-        log.info(f"Slash commands synced to guild {DISCORD_GUILD_ID}")
         # Re-register persistent RSVP handlers for PENDING runs only on restart
         active_runs = db.get_active_runs_discord()
         pending_runs = [r for r in active_runs if r["status"] == "pending"]
         for run in pending_runs:
             self.add_view(make_rsvp_view(run["id"]))
         log.info(f"Re-registered RSVP views for {len(pending_runs)} pending runs")
+
+        # Sync to main guild instantly (no propagation delay)
+        if DISCORD_GUILD_ID:
+            guild = discord.Object(id=DISCORD_GUILD_ID)
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            log.info(f"Slash commands synced to main guild {DISCORD_GUILD_ID}")
+
+        # Global sync — commands appear on ALL servers this bot is in
+        # Data is still fully isolated to this deployment's database
+        await self.tree.sync()
+        log.info("Slash commands synced globally")
+
         scheduler_loop.start()
 
     async def on_ready(self):
         log.info(f"🍄 Discord bot ready as {self.user}")
         await self.change_presence(activity=discord.Game(name="/help for commands"))
+
+    async def on_guild_join(self, guild: discord.Guild):
+        """Instantly sync commands when bot joins a new server."""
+        try:
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            log.info(f"Commands synced to new guild: {guild.name} ({guild.id})")
+        except Exception as e:
+            log.warning(f"Failed to sync commands to {guild.name}: {e}")
 
 client = MapleBot()
 
