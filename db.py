@@ -55,6 +55,9 @@ def init_db():
     """)
 
     c.execute("""
+        ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS runs (
             id           SERIAL PRIMARY KEY,
             boss_id      INTEGER NOT NULL REFERENCES bosses(id),
@@ -792,6 +795,52 @@ def get_discord_link_status(discord_id):
     )
     result = _row(c, c.fetchone())
     conn.close()
+    return result
+
+def get_recent_bosses(limit=3):
+    """Get the most recently scheduled bosses for quick-pick."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT b.name, b.difficulty, COUNT(*) as run_count
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           WHERE r.created_at > NOW() - INTERVAL '30 days'
+           GROUP BY b.name, b.difficulty
+           ORDER BY MAX(r.created_at) DESC
+           LIMIT %s""",
+        (limit,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+def get_character_platform_info(char_ids):
+    """Get platform info (TG/DC) for a list of character IDs."""
+    if not char_ids:
+        return {}
+    conn = get_conn()
+    c = conn.cursor()
+    placeholders = ','.join(['%s'] * len(char_ids))
+    c.execute(
+        f"""SELECT ch.id, ch.telegram_id, ch.discord_id,
+                   du.discord_id as linked_discord
+            FROM characters ch
+            LEFT JOIN discord_users du ON du.telegram_id=ch.telegram_id
+            WHERE ch.id IN ({placeholders})""",
+        char_ids
+    )
+    rows = _rows(c, c.fetchall())
+    conn.close()
+    result = {}
+    for r in rows:
+        has_tg = r["telegram_id"] and r["telegram_id"] > 0
+        has_dc = bool(r["discord_id"] or r["linked_discord"])
+        if has_tg and has_dc:   label = "TG+DC"
+        elif has_tg:            label = "TG"
+        elif has_dc:            label = "DC"
+        else:                   label = "⚠️"
+        result[r["id"]] = label
     return result
 # ── Teams ─────────────────────────────────────────────────────────────────────
 
