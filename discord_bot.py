@@ -440,17 +440,24 @@ class DateTimeModal(discord.ui.Modal, title="Set Run Date & Time (SGT)"):
             await interaction.response.send_message("⚠️ That date/time is in the past.", ephemeral=True); return
         self.run_data["run_at_iso"] = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         self.run_data["time_str"]   = sgt_dt.strftime("%d/%m/%Y %H:%M SGT")
+        self.run_data["reminder_mins"] = 30  # Auto 30-min reminder always
         if self.run_data.get("selected_chars"):
-            view = ReminderView(self.run_data)
+            view = ConfirmRunView(self.run_data)
+            chars        = [db.get_character_by_id(cid) for cid in self.run_data["selected_chars"]]
+            platform_map = db.get_character_platform_info(self.run_data["selected_chars"])
+            member_lines = [f"• {ch['ign']} [{platform_map.get(ch['id'], '⚠️')}]" for ch in chars if ch]
             await interaction.response.send_message(
-                f"{progress_bar(5)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**"
-                f" — {self.run_data['time_str']}\n\n⏰ Set a reminder?",
+                f"{progress_bar(4, 4)}\n\n📋 **Run Summary — Please confirm:**\n\n"
+                f"⚔️ {diff_icon(self.run_data['difficulty'])} **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n"
+                f"📅 {self.run_data['time_str']}\n"
+                f"⏰ Reminder: 30 mins before (auto)\n\n"
+                f"👥 Party ({len(chars)}):\n" + "\n".join(member_lines),
                 view=view, ephemeral=True
             )
         else:
             view = MemberSelectView(self.run_data)
             await interaction.response.send_message(
-                f"{progress_bar(4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**"
+                f"{progress_bar(3, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**"
                 f" — {self.run_data['time_str']}\n\n👥 Select party members:",
                 view=view, ephemeral=True
             )
@@ -458,10 +465,25 @@ class DateTimeModal(discord.ui.Modal, title="Set Run Date & Time (SGT)"):
 # ── Step 1: Boss ──────────────────────────────────────────────────────────────
 
 class BossSelectView(discord.ui.View):
-    def __init__(self, boss_map: dict, creator_id: int):
+    def __init__(self, boss_map: dict, creator_id: int, recent=None):
         super().__init__(timeout=300)
         self.run_data   = {"boss_map": boss_map, "creator_id": creator_id}
-        options = [discord.SelectOption(label=name, value=name) for name in boss_map]
+        options = []
+        # Recent bosses at top
+        seen = set()
+        if recent:
+            for r in recent:
+                key = f"{r['name']}||{r['difficulty']}"
+                if key not in seen and r["name"] in boss_map:
+                    options.append(discord.SelectOption(
+                        label=f"⭐ {r['name']} — {r['difficulty']}",
+                        value=f"recent||{r['name']}||{r['difficulty']}",
+                        description="Recently scheduled"
+                    ))
+                    seen.add(key)
+        # All bosses
+        for name in boss_map:
+            options.append(discord.SelectOption(label=name, value=name))
         select  = discord.ui.Select(placeholder="Choose a boss...", options=options[:25])
         select.callback = self.on_select
         self.add_item(select)
@@ -470,10 +492,24 @@ class BossSelectView(discord.ui.View):
     async def on_select(self, interaction: discord.Interaction):
         if interaction.user.id != self.run_data["creator_id"]:
             await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True); return
-        self.run_data["boss_name"] = interaction.data["values"][0]
+        val = interaction.data["values"][0]
+        # Handle recent quick-pick (skips difficulty step)
+        if val.startswith("recent||"):
+            _, boss_name, difficulty = val.split("||")
+            self.run_data["boss_name"]  = boss_name
+            self.run_data["difficulty"] = difficulty
+            teams = db.get_all_teams()
+            view  = MethodSelectView(self.run_data) if teams else MemberSelectView(self.run_data)
+            label = "How would you like to add members?" if teams else "👥 Select party members:"
+            await interaction.response.edit_message(
+                content=f"{progress_bar(2, 4)}\n\n⚔️ **{boss_name} {difficulty}**\n\n{label}",
+                view=view
+            )
+            return
+        self.run_data["boss_name"] = val
         view = DiffSelectView(self.run_data)
         await interaction.response.edit_message(
-            content=f"{progress_bar(2)}\n\nBoss: **{self.run_data['boss_name']}**\n\n🎯 Select difficulty:",
+            content=f"{progress_bar(2, 4)}\n\nBoss: **{self.run_data['boss_name']}**\n\n🎯 Select difficulty:",
             view=view
         )
 
@@ -493,7 +529,7 @@ class DiffSelectView(discord.ui.View):
 
     async def _go_back(self, interaction: discord.Interaction):
         view = BossSelectView(self.run_data["boss_map"], self.run_data["creator_id"])
-        await interaction.response.edit_message(content=f"{progress_bar(1)}\n\n⚔️ Select a boss:", view=view)
+        await interaction.response.edit_message(content=f"{progress_bar(1, 4)}\n\n⚔️ Select a boss:", view=view)
 
     async def on_select(self, interaction: discord.Interaction):
         if interaction.user.id != self.run_data["creator_id"]:
@@ -503,13 +539,13 @@ class DiffSelectView(discord.ui.View):
         if teams:
             view = MethodSelectView(self.run_data)
             await interaction.response.edit_message(
-                content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 How would you like to add members?",
+                content=f"{progress_bar(3, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 How would you like to add members?",
                 view=view
             )
         else:
             view = MemberSelectView(self.run_data)
             await interaction.response.edit_message(
-                content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 Select party members:",
+                content=f"{progress_bar(3, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 Select party members:",
                 view=view
             )
 
@@ -550,7 +586,7 @@ class MethodSelectView(discord.ui.View):
         view.add_item(BackButton(self._go_back))
         view.add_item(CancelButton())
         await interaction.response.edit_message(
-            content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n📋 Select a preset team:",
+            content=f"{progress_bar(3, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n📋 Select a preset team:",
             view=view
         )
 
@@ -560,14 +596,14 @@ class MethodSelectView(discord.ui.View):
             await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True); return
         view = MemberSelectView(self.run_data)
         await interaction.response.edit_message(
-            content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 Select party members:",
+            content=f"{progress_bar(3, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 Select party members:",
             view=view
         )
 
     async def _go_back(self, interaction: discord.Interaction):
         view = DiffSelectView(self.run_data)
         await interaction.response.edit_message(
-            content=f"{progress_bar(2)}\n\nBoss: **{self.run_data['boss_name']}**\n\n🎯 Select difficulty:",
+            content=f"{progress_bar(2, 4)}\n\nBoss: **{self.run_data['boss_name']}**\n\n🎯 Select difficulty:",
             view=view
         )
 
@@ -587,12 +623,14 @@ class MemberSelectView(discord.ui.View):
     def __init__(self, run_data: dict):
         super().__init__(timeout=300)
         self.run_data = run_data
-        all_chars = db.get_all_characters_discord()
-        options   = [
+        all_chars    = db.get_all_characters_discord()
+        char_ids     = [ch["id"] for ch in all_chars]
+        platform_map = db.get_character_platform_info(char_ids)
+        options      = [
             discord.SelectOption(
                 label=f"{ch['ign']}" + (f" Lv.{ch['level']}" if ch["level"] else ""),
                 value=str(ch["id"]),
-                description=ch["class"] or "No class"
+                description=f"{ch['class'] or 'No class'} [{platform_map.get(ch['id'], '⚠️')}]"
             )
             for ch in all_chars[:25]
         ]
@@ -620,7 +658,7 @@ class MemberSelectView(discord.ui.View):
             # Can't send modal after send_message, so edit to show date picker via view
             view = DatePickerPromptView(self.run_data)
             await interaction.followup.send(
-                f"{progress_bar(4)}\n\nSet the date and time for this run:",
+                f"{progress_bar(4, 4)}\n\nSet the date and time for this run:",
                 view=view, ephemeral=True
             )
         else:
@@ -631,13 +669,13 @@ class MemberSelectView(discord.ui.View):
         if teams:
             view = MethodSelectView(self.run_data)
             await interaction.response.edit_message(
-                content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 How would you like to add members?",
+                content=f"{progress_bar(3, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 How would you like to add members?",
                 view=view
             )
         else:
             view = DiffSelectView(self.run_data)
             await interaction.response.edit_message(
-                content=f"{progress_bar(2)}\n\nBoss: **{self.run_data['boss_name']}**\n\n🎯 Select difficulty:",
+                content=f"{progress_bar(2, 4)}\n\nBoss: **{self.run_data['boss_name']}**\n\n🎯 Select difficulty:",
                 view=view
             )
 
@@ -668,7 +706,7 @@ class ReminderView(discord.ui.View):
         view         = ConfirmRunView(self.run_data)
         await interaction.response.edit_message(
             content=(
-                f"{progress_bar(6)}\n\n📋 **Run Summary — Please confirm:**\n\n"
+                f"{progress_bar(4, 4)}\n\n📋 **Run Summary — Please confirm:**\n\n"
                 f"⚔️ {diff_icon(self.run_data['difficulty'])} **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n"
                 f"📅 {self.run_data['time_str']}\n"
                 f"⏰ Reminder: {REMINDER_MAP[mins]}\n\n"
@@ -685,7 +723,7 @@ class ReminderView(discord.ui.View):
         self.run_data.pop("time_str", None)
         view = MemberSelectView(self.run_data)
         await interaction.response.edit_message(
-            content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\nAdjust members or proceed to re-enter date:",
+            content=f"{progress_bar(3, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\nAdjust members or proceed to re-enter date:",
             view=view
         )
 
@@ -710,11 +748,11 @@ class ConfirmRunView(discord.ui.View):
         run_id = db.create_run_discord(boss["id"], interaction.user.id, data["run_at_iso"])
         for char_id in data["selected_chars"]:
             db.add_run_member(run_id, char_id)
-        if data.get("reminder_mins", 0) > 0:
-            sgt_dt    = datetime.fromisoformat(data["run_at_iso"]).replace(tzinfo=timezone.utc)
-            remind_dt = sgt_dt - timedelta(minutes=data["reminder_mins"])
-            if remind_dt > datetime.now(timezone.utc):
-                db.set_run_reminder(run_id, remind_dt.strftime("%Y-%m-%d %H:%M:%S"))
+        # Always set 30-min reminder
+        sgt_dt    = datetime.fromisoformat(data["run_at_iso"]).replace(tzinfo=timezone.utc)
+        remind_dt = sgt_dt - timedelta(minutes=30)
+        if remind_dt > datetime.now(timezone.utc):
+            db.set_run_reminder(run_id, remind_dt.strftime("%Y-%m-%d %H:%M:%S"))
         run      = db.get_run(run_id)
         members  = db.get_run_members_discord(run_id)
         embed    = fmt_run_embed(run, members)
@@ -738,7 +776,10 @@ class ConfirmRunView(discord.ui.View):
                 tg_notified, tg_skipped = await _notify_via_telegram(run_id, members, run, data)
 
                 # Build summary message
-                summary = f"✅ **Run #{run_id} created and posted!** Check <#{ch_target.id}>."
+                summary = (
+                    f"✅ **Run #{run_id} created and posted!** Check <#{ch_target.id}>\n"
+                    f"To edit: `/editrun {run_id}` · To cancel: `/cancelrun {run_id}`"
+                )
 
                 if tg_notified:
                     summary += f"\n📱 Telegram notified: {', '.join(tg_notified)}"
@@ -767,7 +808,7 @@ class ConfirmRunView(discord.ui.View):
             await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True); return
         view = ReminderView(self.run_data)
         await interaction.response.edit_message(
-            content=f"{progress_bar(5)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}** — {self.run_data['time_str']}\n\n⏰ Set a reminder?",
+            content=f"{progress_bar(4, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}** — {self.run_data['time_str']}\n\n⏰ Set a reminder?",
             view=view
         )
 
@@ -956,9 +997,10 @@ async def slash_createrun(interaction: discord.Interaction):
     grouped = {}
     for b in bosses:
         grouped.setdefault(b["name"], []).append(b["difficulty"])
-    view = BossSelectView(grouped, interaction.user.id)
+    recent = db.get_recent_bosses(3)
+    view   = BossSelectView(grouped, interaction.user.id, recent)
     await interaction.response.send_message(
-        f"{progress_bar(1)}\n\n⚔️ **Create a Boss Run**\n\nSelect a boss:",
+        f"{progress_bar(1, 4)}\n\n⚔️ **Create a Boss Run**\n\nSelect a boss:\n⭐ = recently scheduled",
         view=view, ephemeral=True
     )
 
@@ -981,13 +1023,13 @@ async def slash_quickrun(interaction: discord.Interaction, boss: str, difficulty
     if teams:
         view = MethodSelectView(run_data)
         await interaction.response.send_message(
-            f"{progress_bar(3)}\n\n⚔️ **{boss} {difficulty}**\n\n👥 How would you like to add members?",
+            f"{progress_bar(3, 4)}\n\n⚔️ **{boss} {difficulty}**\n\n👥 How would you like to add members?",
             view=view, ephemeral=True
         )
     else:
         view = MemberSelectView(run_data)
         await interaction.response.send_message(
-            f"{progress_bar(3)}\n\n⚔️ **{boss} {difficulty}**\n\n👥 Select party members:",
+            f"{progress_bar(3, 4)}\n\n⚔️ **{boss} {difficulty}**\n\n👥 Select party members:",
             view=view, ephemeral=True
         )
 
