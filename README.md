@@ -1,270 +1,162 @@
-# 🍄 MapleStory Guild Boss Scheduler — Telegram Bot
+# 🍄 MapleStory Weekly Boss Scheduler
 
-A Telegram bot for scheduling MapleStory boss runs with your guild. Create runs, invite party members, track acceptances, and get reminders — all through inline buttons, no typing needed.
-
----
-
-## Features
-
-- **Guided run creation** — step-by-step button flow for boss, difficulty, members, date, time, and reminder
-- **Preset teams** — save recurring party lineups and load them in one tap when creating a run
-- **Private DM invitations** — each member gets an Accept / Decline button in their DM
-- **Auto-cancel on decline** — if anyone declines, the run is cancelled and all members are notified
-- **Progress tracking** — leader gets notified as each member accepts (e.g. 3/6 accepted)
-- **Run confirmation** — when all members accept, everyone gets a confirmed notification
-- **Reminders** — set a reminder 1 hour, 30 mins, or 15 mins before the run
-- **Edit runs** — change date/time or swap party members after creation (resets to pending)
-- **Resend invites** — re-DM members who haven't responded yet
-- **Auto-cancel pending runs** — runs with no response auto-cancel after 12 hours
-- **Grouped run list** — `/runs` shows confirmed and pending runs in separate sections
-- **Multi-character support** — each user can register multiple IGNs
+A bot for scheduling MapleStory boss runs with your guild — available on both **Telegram** and **Discord**. Create runs, invite members, track who's accepted, and get automatic reminders. No spreadsheets, no hassle.
 
 ---
 
-## Stack
+## What it does
 
-| Component | Technology |
-|---|---|
-| Bot framework | python-telegram-bot 20.7 |
-| Database | PostgreSQL (psycopg2-binary) |
-| Scheduler | APScheduler |
-| Hosting | Railway |
-| Python version | 3.11.11 |
+- **Create a boss run** in a few taps — pick the boss, select your party, choose a date and time
+- **Automatically invites** every party member via private message with Accept / Decline buttons
+- **Tracks responses** in real time — the leader sees who has accepted and who hasn't
+- **Confirms the run** when everyone accepts and notifies the whole party
+- **Cancels the run** automatically if anyone declines and notifies everyone
+- **Sends a reminder** 30 minutes before every run
+- **Works across platforms** — create a run on Telegram, members get notified on Discord too, and vice versa
 
 ---
 
-## Setup
+## Getting started
 
-### 1. Repository files
+### Step 1 — Start the bot
 
-Make sure your repository contains:
+**Telegram:** Search for the bot username and tap **Start**
+
+**Discord:** Type `/start` in any channel
+
+### Step 2 — Register your character
+
+**Telegram:**
 ```
-bot.py
-db.py
-requirements.txt
-Procfile
-runtime.txt
+/register YourIGN Bowmaster 275
 ```
 
-### 2. Create a Telegram bot
+**Discord:**
+```
+/register YourIGN Bowmaster 275
+```
 
-1. Open Telegram → message `@BotFather`
-2. Send `/newbot` and follow the prompts
-3. Copy your **bot token** (e.g. `123456789:AAFxxx...`)
-4. Go to **Bot Settings → Group Privacy → Turn off** so the bot can read messages in groups
+Class and level are optional — just the IGN is enough to get started.
 
-### 3. Deploy on Railway
+### Step 3 — Link your accounts (optional but recommended)
 
-1. Go to [railway.app](https://railway.app) → **New Project → Deploy from GitHub repo**
-2. Select your repository
-3. Add a PostgreSQL database: **New → Database → Add PostgreSQL**
-4. Go to your bot service → **Variables** tab and set:
+If your guild uses both Telegram and Discord, linking your accounts means you'll receive run invites on both platforms no matter where the run was created.
 
-| Variable | Value | Required |
-|---|---|---|
-| `BOT_TOKEN` | Your Telegram bot token | ✅ Yes |
-| `GROUP_CHAT_ID` | Your guild group chat ID | Optional |
-| `GROUP_THREAD_ID` | Thread/topic ID for announcements | Optional |
+1. On **Telegram**, type `/linkdiscord`
+2. You'll get an 8-character code (e.g. `AB12CD34`) — it expires in 10 minutes
+3. On **Discord**, type `/linkaccount AB12CD34`
 
-Railway sets `DATABASE_URL` automatically from the PostgreSQL service.
+Done — your accounts are now linked.
 
-### 4. Get your group and thread IDs
+---
 
-1. Add your bot to your guild Telegram group
-2. Type `/chatid` in the channel you want announcements posted to
-3. The bot replies with both **Chat ID** and **Thread ID**
-4. Set these as Railway environment variables
+## Creating a boss run
 
-### 5. Verify
+Type `/createrun` (Telegram) or `/createrun` (Discord) and follow the prompts:
 
-Type `/version` in Telegram — the bot replies with its start time in SGT confirming it's live.
+1. **Pick a boss** — recently run bosses appear at the top for quick selection
+2. **Pick difficulty**
+3. **Add members** — choose from a preset team or select individually
+4. **Pick a date** — only the next 4 weeks are shown
+5. **Pick a time** — common times (8pm, 9pm, 10pm, 11pm) are shown as one-tap shortcuts
+6. **Confirm** — review the summary and post the run
+
+The bot will automatically DM every invited member with Accept / Decline buttons. A 30-minute reminder is set automatically.
+
+---
+
+## Preset Teams
+
+If you run with the same group every week, save them as a preset team so you don't have to select members every time.
+
+**Create a team:**
+```
+/createteam Lotus Party
+```
+Then select the members and confirm.
+
+**When creating a run**, tap **Load from Team** to instantly pre-select your saved team.
+
+**Manage teams:**
+```
+/teams            — see all saved teams
+/editteam Lotus Party   — change the members
+/deleteteam Lotus Party — delete the team
+```
 
 ---
 
 ## All Commands
 
 ### Characters
-
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/register <IGN> [Class] [Level]` | Register a character — e.g. `/register Ayumilove Bowmaster 275` |
-| `/chars` | List your own registered characters |
-| `/allchars` | List all guild characters |
-| `/removechar <IGN>` | Remove one of your characters |
+| `/register <IGN> [Class] [Level]` | Register your character |
+| `/chars` | See your characters |
+| `/allchars` | See all guild characters |
 
-### Bosses
-
-| Command | Description |
+### Scheduling
+| Command | What it does |
 |---|---|
-| `/bosses` | Show all available bosses and difficulties |
+| `/createrun` | Create a boss run (guided) |
+| `/editrun <run ID>` | Change the date/time or party members |
+| `/cancelrun <run ID>` | Cancel a run |
+| `/resendrun <run ID>` | Resend invites to members who haven't responded |
+| `/myruns` | See runs you're invited to |
+| `/runs` | See all upcoming guild runs |
 
-### Preset Teams
-
-| Command | Description |
+### Teams
+| Command | What it does |
 |---|---|
-| `/createteam` | Create a preset party (type name → select members → confirm) |
-| `/teams` | List all saved preset teams |
-| `/editteam <name>` | Rename a team or change its members |
-| `/deleteteam <name>` | Delete a preset team |
+| `/createteam <name>` | Create a preset team |
+| `/teams` | List all preset teams |
+| `/editteam <name>` | Edit a team's members |
+| `/deleteteam <name>` | Delete a team |
 
-### Scheduling (Party Leaders)
-
-| Command | Description |
+### Account
+| Command | What it does |
 |---|---|
-| `/createrun` | Create a boss run — full guided button flow |
-| `/editrun <run_id>` | Edit the date/time or party members of a run |
-| `/cancelrun <run_id>` | Cancel a run and notify all members |
-| `/resendrun <run_id>` | Re-DM members who haven't responded yet |
-
-### Members
-
-| Command | Description |
-|---|---|
-| `/myruns` | See all upcoming runs you're invited to |
-| `/runs` | See all upcoming guild runs (grouped by status) |
-
-### Utility
- 
-| Command | Description |
-|---|---|
-| `/start` | to DM the bot to register |
-| `/help` | Show all commands |
-| `/chatid` | Get the current chat ID and thread ID |
-| `/version` | Show last deployed version's time in SGT |
+| `/linkdiscord` | Generate a code to link your Discord account (Telegram only) |
+| `/linkaccount <code>` | Link your Telegram account (Discord only) |
+| `/linkstatus` | Check if your accounts are linked |
 
 ---
 
-## Boss Run Flow
+## Run flow — what happens after you create a run
 
 ```
-Leader: /createrun
-  Step 1 → Pick boss (buttons)
-  Step 2 → Pick difficulty (buttons)
-  Step 3 → Select party members
-           - Toggle individuals on/off
-           - Tap a 📋 preset team to pre-load that team's members
-           - Mix: load a team then add/remove individuals
-  Step 4 → Pick date (calendar — past dates hidden)
-  Step 5 → Pick hour + minute (grid + fine controls)
-  Step 6 → Set reminder (1hr / 30min / 15min / none)
-         → Review summary → Confirm
-
-Bot: DMs each member with ✅ Accept / ❌ Decline buttons
-Bot: Posts announcement to group/thread
-
-Member taps Accept:
-  → Leader gets progress update (e.g. "3/6 accepted")
-  → When all accept → CONFIRMED notification to all members + group
-
-Member taps Decline:
-  → Run is auto-cancelled
-  → All members + group notified with who declined
-  → Leader can use /createrun to start a new one
+You create the run
+        ↓
+Every member gets a DM with Accept / Decline buttons
+        ↓
+As each member accepts, you get a progress update (e.g. 3/6 accepted)
+        ↓
+Once everyone accepts → RUN CONFIRMED — all members notified
+        ↓
+If anyone declines → RUN CANCELLED — all members notified
+        ↓
+30 minutes before the run → REMINDER sent to all members
 ```
 
 ---
 
-## Preset Teams Flow
+## Member invite indicators
 
-```
-Leader: /createteam
-  → Type team name (e.g. "Lotus Party")
-  → Select members (toggle buttons)
-  → Confirm
+When you review the run summary before confirming, each member shows a platform tag:
 
-When creating a run:
-  → In Step 3, saved teams appear as 📋 buttons
-  → Tap a team to instantly pre-select all its members
-  → Still add or remove individuals as needed
-
-/editteam Lotus Party
-  → Choose: Rename OR Edit Members
-  → Make changes → saved instantly
-```
-
----
-
-## Boss List
-
-| Boss | Difficulties |
+| Tag | Meaning |
 |---|---|
-| Lotus | Extreme |
-| Kalos | Normal, Chaos, Extreme |
-| Kaling | Normal, Hard, Extreme |
-| First Adversary | Normal, Hard, Extreme |
-| Black Mage | Normal, Hard, Extreme |
-| Seren | Normal, Hard, Extreme |
-| Malefic | Normal, Hard, Extreme |
-| Limbo | Normal, Hard |
-| Baldrix | Normal, Hard |
-
-To update the boss list, edit `BOSSES` in `db.py`, then run this in Railway's Postgres query tab to remove old entries:
-
-```sql
-DELETE FROM bosses
-WHERE name NOT IN (
-  'Lotus','Kalos','Kaling','First Adversary',
-  'Black Mage','Seren','Malefic','Limbo','Baldrix'
-);
-```
+| `[TG+DC]` | Has both Telegram and Discord linked — will be notified on both |
+| `[TG]` | Telegram only |
+| `[DC]` | Discord only |
+| `[⚠️]` | No platform linked — may not receive the invite |
 
 ---
 
-## Scheduler Jobs
+## Tips
 
-| Job | Frequency | Description |
-|---|---|---|
-| Reminders | Every 15 min | Sends reminder DMs for confirmed runs at their set reminder time (30-min lookback window) |
-| Auto-cancel | Every hour | Cancels pending runs older than 12 hours with no full response |
-
----
-
-## Run List Format
-
-`/runs` and `/myruns` display runs grouped by status:
-
-```
-📅 UPCOMING RUNS
-
-✅ CONFIRMED
-──────────────
-⚔️ #1 · Lotus Hard 🟠
-📅 28/06/2026 21:00 SGT
-👑 @leader
-👥 6/6 accepted
-- - - - - - - - - - - - - -
-⚔️ #2 · Kaling Extreme ⚫
-📅 30/06/2026 20:00 SGT
-👑 @leader
-👥 4/6 accepted · Pending: IGN1 (@user1), IGN2 (@user2)
-
-⏳ PENDING
-──────────────
-⚔️ #3 · Baldrix Hard 🟠
-📅 01/07/2026 21:00 SGT
-👑 @leader2
-👥 0/4 accepted · Pending: IGN1, IGN2, IGN3, IGN4
-```
-
----
-
-## Important Notes
-
-- **Every member must DM the bot first** — each guild member must open a private chat with the bot and send `/start` before they can receive DM invitations. Sending `/start` in the group is not enough.
-- **All times are SGT** (UTC+8)
-- **IGNs are globally unique** — each in-game name can only be registered once across all users
-- **Editing a run resets it to PENDING** — all members must re-accept after any edit
-- **Declining cancels the run** — if any member declines, the entire run is cancelled and the leader must create a new one
-- **Multiple instances** — if you see a "Conflict: terminated by other getUpdates" error, make sure the bot is not running locally AND on Railway at the same time. Restart Railway to fix it.
-
----
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `bot.py` | Main bot logic — commands, conversation handlers, scheduler |
-| `db.py` | PostgreSQL database access layer |
-| `requirements.txt` | Python dependencies |
-| `Procfile` | Railway worker process definition |
-| `runtime.txt` | Python version pin (3.11.11) |
+- **All times are in SGT (UTC+8)**
+- **Members must start the bot first** — on Telegram, each member needs to open a private chat with the bot and send `/start` before they can receive invites
+- **To edit or cancel a run**, the bot will tell you the run ID after creation (e.g. `To edit: /editrun 5`)
+- **Runs auto-cancel** if not everyone responds within 12 hours
+- **Discord quick run** — use `/quickrun Lotus Hard` to skip straight to member selection
