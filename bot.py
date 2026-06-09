@@ -722,8 +722,17 @@ async def _render_confirmation(query, ctx):
         await query.edit_message_text("⚠️ That date/time is in the past. Use /createrun to start over.")
         ctx.user_data.clear(); return ConversationHandler.END
 
-    ctx.user_data["run_at_iso"]      = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    ctx.user_data["reminder_minutes"] = 30  # Always 30 mins auto
+    ctx.user_data["run_at_iso"] = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    # Reminder at 8am SGT on the day of the run, unless run is today
+    sgt_tz  = timezone(timedelta(hours=8))
+    now_sgt = datetime.now(sgt_tz)
+    run_8am = sgt_dt.replace(hour=8, minute=0, second=0, microsecond=0)
+    if run_8am.date() > now_sgt.date():
+        ctx.user_data["reminder_8am_iso"] = run_8am.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        ctx.user_data["reminder_label"]   = "8:00 AM SGT on the day of the run"
+    else:
+        ctx.user_data["reminder_8am_iso"] = None
+        ctx.user_data["reminder_label"]   = "None (same-day run)"
 
     chars        = [db.get_character_by_id(cid) for cid in selected]
     platform_map = db.get_character_platform_info(selected)
@@ -738,7 +747,7 @@ async def _render_confirmation(query, ctx):
         f"📋 Run Summary — Please confirm:\n\n"
         f"⚔️ {diff_icon(difficulty)} {boss_name} {difficulty}\n"
         f"📅 {d:02d}/{mo:02d}/{y} {hour:02d}:{minute:02d} SGT\n"
-        f"⏰ Reminder: 30 mins before (auto)\n\n"
+        f"⏰ Reminder: {ctx.user_data['reminder_label']}\n\n"
         f"👥 Party ({len(chars)}):\n{member_list}\n\n"
         f"Tap Confirm to create and notify all members.",
         reply_markup=InlineKeyboardMarkup([[
@@ -767,11 +776,9 @@ async def step_confirm_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     run_id = db.create_run(boss["id"], update.effective_user.id, run_at_iso)
     for char_id in selected:
         db.add_run_member(run_id, char_id)
-    if reminder_mins > 0:
-        sgt_dt    = datetime(y, mo, d, hour, minute, tzinfo=timezone(timedelta(hours=8)))
-        remind_dt = sgt_dt - timedelta(minutes=reminder_mins)
-        if remind_dt > datetime.now(timezone.utc):
-            db.set_run_reminder(run_id, remind_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+    reminder_8am = ctx.user_data.get("reminder_8am_iso")
+    if reminder_8am:
+        db.set_run_reminder(run_id, reminder_8am)
     await query.edit_message_text(f"🎉 Run #{run_id} created! Notifying members...")
     await _notify_run(ctx, run_id, boss_name, difficulty, y, mo, d, hour, minute,
                       reminder_mins, update.effective_user.username or str(update.effective_user.id),
