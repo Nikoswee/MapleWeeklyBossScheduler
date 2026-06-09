@@ -440,7 +440,20 @@ class DateTimeModal(discord.ui.Modal, title="Set Run Date & Time (SGT)"):
             await interaction.response.send_message("⚠️ That date/time is in the past.", ephemeral=True); return
         self.run_data["run_at_iso"] = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         self.run_data["time_str"]   = sgt_dt.strftime("%d/%m/%Y %H:%M SGT")
-        self.run_data["reminder_mins"] = 30  # Auto 30-min reminder always
+        # Reminder at 8am SGT on day of run, unless run is today
+        from datetime import timezone as _tz, timedelta as _td
+        sgt_tz  = _tz(_td(hours=8))
+        sgt_dt_check = datetime.fromisoformat(self.run_data["run_at_iso"]).replace(tzinfo=_tz.utc).astimezone(sgt_tz)
+        now_sgt = datetime.now(sgt_tz)
+        run_8am = sgt_dt_check.replace(hour=8, minute=0, second=0, microsecond=0)
+        if run_8am.date() > now_sgt.date():
+            self.run_data["reminder_mins"]    = -1  # flag
+            self.run_data["reminder_8am_iso"] = run_8am.astimezone(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+            self.run_data["reminder_label"]   = "8:00 AM SGT on the day of the run"
+        else:
+            self.run_data["reminder_mins"]    = 0
+            self.run_data["reminder_8am_iso"] = None
+            self.run_data["reminder_label"]   = "None (same-day run)"
         if self.run_data.get("selected_chars"):
             view = ConfirmRunView(self.run_data)
             chars        = [db.get_character_by_id(cid) for cid in self.run_data["selected_chars"]]
@@ -450,7 +463,7 @@ class DateTimeModal(discord.ui.Modal, title="Set Run Date & Time (SGT)"):
                 f"{progress_bar(4, 4)}\n\n📋 **Run Summary — Please confirm:**\n\n"
                 f"⚔️ {diff_icon(self.run_data['difficulty'])} **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n"
                 f"📅 {self.run_data['time_str']}\n"
-                f"⏰ Reminder: 30 mins before (auto)\n\n"
+                f"⏰ Reminder: {self.run_data.get('reminder_label', '8:00 AM SGT on the day of the run')}\n\n"
                 f"👥 Party ({len(chars)}):\n" + "\n".join(member_lines),
                 view=view, ephemeral=True
             )
@@ -748,11 +761,10 @@ class ConfirmRunView(discord.ui.View):
         run_id = db.create_run_discord(boss["id"], interaction.user.id, data["run_at_iso"])
         for char_id in data["selected_chars"]:
             db.add_run_member(run_id, char_id)
-        # Always set 30-min reminder
-        sgt_dt    = datetime.fromisoformat(data["run_at_iso"]).replace(tzinfo=timezone.utc)
-        remind_dt = sgt_dt - timedelta(minutes=30)
-        if remind_dt > datetime.now(timezone.utc):
-            db.set_run_reminder(run_id, remind_dt.strftime("%Y-%m-%d %H:%M:%S"))
+        # Save 8am reminder if set
+        reminder_8am = data.get("reminder_8am_iso")
+        if reminder_8am:
+            db.set_run_reminder(run_id, reminder_8am)
         run      = db.get_run(run_id)
         members  = db.get_run_members_discord(run_id)
         embed    = fmt_run_embed(run, members)
@@ -905,7 +917,7 @@ async def slash_help(interaction: discord.Interaction):
         "📋 **All Commands**\n\n"
         "**Account**\n"
         "`/start` `/register` `/chars` `/allchars`\n"
-        "`/linkaccount <code>` — link to Telegram account, generate code through telegram -> /linkdiscord\n"
+        "`/linkaccount <code>` — link to Telegram account\n"
         "`/linkstatus` — check link status\n\n"
         "**Preset Teams**\n"
         "`/createteam` `/teams` `/editteam` `/deleteteam`\n\n"
