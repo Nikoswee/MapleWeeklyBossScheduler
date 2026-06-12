@@ -200,7 +200,7 @@ async def _notify_via_telegram(run_id, members, run, data):
 
     sgt          = get_run_dt(run) + timedelta(hours=8)
     time_str     = sgt.strftime("%d/%m/%Y %H:%M SGT")
-    reminder_str = REMINDER_MAP.get(data.get("reminder_mins", 0), "No reminder")
+    reminder_str = data.get("reminder_label", "8:00 AM SGT on the day of the run")
 
     # Build accept/decline buttons for Telegram
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -694,57 +694,7 @@ class MemberSelectView(discord.ui.View):
 
 # ── Step 5: Reminder ──────────────────────────────────────────────────────────
 
-REMINDER_MAP = {60: "1 hour before", 30: "30 mins before", 15: "15 mins before", 0: "No reminder"}
 
-class ReminderView(discord.ui.View):
-    def __init__(self, run_data: dict):
-        super().__init__(timeout=300)
-        self.run_data = run_data
-
-    @discord.ui.button(label="⏰ 1 hour before",  style=discord.ButtonStyle.secondary, row=0)
-    async def r60(self, i, b): await self._set(i, 60)
-    @discord.ui.button(label="⏰ 30 mins before", style=discord.ButtonStyle.secondary, row=0)
-    async def r30(self, i, b): await self._set(i, 30)
-    @discord.ui.button(label="⏰ 15 mins before", style=discord.ButtonStyle.secondary, row=1)
-    async def r15(self, i, b): await self._set(i, 15)
-    @discord.ui.button(label="🚫 No reminder",    style=discord.ButtonStyle.secondary, row=1)
-    async def r0(self, i, b):  await self._set(i, 0)
-
-    async def _set(self, interaction: discord.Interaction, mins: int):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True); return
-        self.run_data["reminder_mins"] = mins
-        chars        = [db.get_character_by_id(cid) for cid in self.run_data["selected_chars"]]
-        member_names = ", ".join(ch["ign"] for ch in chars if ch)
-        view         = ConfirmRunView(self.run_data)
-        await interaction.response.edit_message(
-            content=(
-                f"{progress_bar(4, 4)}\n\n📋 **Run Summary — Please confirm:**\n\n"
-                f"⚔️ {diff_icon(self.run_data['difficulty'])} **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n"
-                f"📅 {self.run_data['time_str']}\n"
-                f"⏰ Reminder: {REMINDER_MAP[mins]}\n\n"
-                f"👥 Party ({len(chars)}): {member_names}"
-            ),
-            view=view
-        )
-
-    @discord.ui.button(label="◀ Back (change date/time)", style=discord.ButtonStyle.secondary, row=2)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True); return
-        self.run_data.pop("run_at_iso", None)
-        self.run_data.pop("time_str", None)
-        view = MemberSelectView(self.run_data)
-        await interaction.response.edit_message(
-            content=f"{progress_bar(3, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\nAdjust members or proceed to re-enter date:",
-            view=view
-        )
-
-    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger, row=2)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="❌ Run creation cancelled.", view=None)
-
-# ── Step 6: Confirm ───────────────────────────────────────────────────────────
 
 class ConfirmRunView(discord.ui.View):
     def __init__(self, run_data: dict):
@@ -779,7 +729,7 @@ class ConfirmRunView(discord.ui.View):
         if ch_target:
             try:
                 msg = await ch_target.send(
-                    content=f"📢 **New Boss Run!** {mentions}\n⏰ Reminder: {REMINDER_MAP.get(data.get('reminder_mins',0),'No reminder')}\nAccept or decline below:",
+                    content=f"📢 **New Boss Run!** {mentions}\n⏰ Reminder: {data.get('reminder_label', '8:00 AM SGT')}\nAccept or decline below:",
                     embed=embed, view=view
                 )
                 db.set_run_discord_message(run_id, msg.id, ch_target.id)
@@ -818,7 +768,7 @@ class ConfirmRunView(discord.ui.View):
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.run_data["creator_id"]:
             await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True); return
-        view = ReminderView(self.run_data)
+        view = ConfirmRunView(self.run_data)
         await interaction.response.edit_message(
             content=f"{progress_bar(4, 4)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}** — {self.run_data['time_str']}\n\n⏰ Set a reminder?",
             view=view
