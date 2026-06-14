@@ -238,6 +238,99 @@ def _check_team_creator(query, ctx):
 
 # ── /createteam ───────────────────────────────────────────────────────────────
 
+# ── /createrun ────────────────────────────────────────────────────────────────
+
+async def createrun_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db.upsert_user(update.effective_user.id, update.effective_user.username or "")
+    ctx.user_data.clear()
+    ctx.user_data["creator_id"] = update.effective_user.id
+    bosses  = db.get_all_bosses()
+    grouped = {}
+    for b in bosses:
+        grouped.setdefault(b["name"], []).append(b["difficulty"])
+    ctx.user_data["boss_map"]  = grouped
+    ctx.user_data["boss_list"] = list(grouped.keys())
+
+    # Show recent bosses at top as quick picks
+    recent   = db.get_recent_bosses(3)
+    keyboard = []
+    if recent:
+        keyboard.append([InlineKeyboardButton("⭐ Recent", callback_data="cal_noop")])
+        for r in recent:
+            if r["name"] in grouped and r["difficulty"] in grouped[r["name"]]:
+                b_idx = ctx.user_data["boss_list"].index(r["name"])
+                d_idx = grouped[r["name"]].index(r["difficulty"])
+                keyboard.append([InlineKeyboardButton(
+                    f"⭐ {r['name']} {r['difficulty']}",
+                    callback_data=f"boss_diff_{b_idx}_{d_idx}"
+                )])
+        keyboard.append([InlineKeyboardButton("── All Bosses ──", callback_data="cal_noop")])
+    for i, name in enumerate(grouped):
+        keyboard.append([InlineKeyboardButton(name, callback_data=f"boss_{i}")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
+    await update.message.reply_text(
+        "⚔️ Create a Boss Run\n\nStep 1 — Which boss?\n⭐ = recently scheduled",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return SELECT_BOSS
+
+async def step_select_boss(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await _check_creator(query, ctx): return SELECT_BOSS
+    await query.answer()
+    if query.data == "cx":
+        await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear(); return ConversationHandler.END
+
+    # Handle quick-pick boss+difficulty shortcut
+    if query.data.startswith("boss_diff_"):
+        parts     = query.data.split("_")
+        boss_idx  = int(parts[2])
+        diff_idx  = int(parts[3])
+        boss_name = ctx.user_data["boss_list"][boss_idx]
+        ctx.user_data["boss_name"]      = boss_name
+        ctx.user_data["difficulty"]     = ctx.user_data["boss_map"][boss_name][diff_idx]
+        ctx.user_data["selected_chars"] = []
+        return await _render_method_picker(query, ctx)
+
+    idx       = int(query.data.split("_")[1])
+    boss_name = ctx.user_data["boss_list"][idx]
+    ctx.user_data["boss_name"] = boss_name
+    diffs     = ctx.user_data["boss_map"][boss_name]
+    ctx.user_data["diff_list"] = diffs
+    keyboard  = [
+        [InlineKeyboardButton(f"{diff_icon(d)} {d}", callback_data=f"diff_{i}")]
+        for i, d in enumerate(diffs)
+    ]
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cx")])
+    await query.edit_message_text(
+        f"⚔️ Create a Boss Run\n\nBoss: {boss_name}\n\nStep 2 — Difficulty?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return SELECT_DIFF
+
+async def step_select_diff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await _check_creator(query, ctx): return SELECT_DIFF
+    await query.answer()
+    if query.data == "cx":
+        await query.edit_message_text("❌ Run creation cancelled.")
+        ctx.user_data.clear(); return ConversationHandler.END
+    idx = int(query.data.split("_")[1])
+    ctx.user_data["difficulty"]     = ctx.user_data["diff_list"][idx]
+    ctx.user_data["selected_chars"] = []
+    return await _render_method_picker(query, ctx)
+
+async def createrun_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("❌ Run creation cancelled.")
+    elif update.message:
+        await update.message.reply_text("❌ Run creation cancelled.")
+    return ConversationHandler.END
+
+
 async def createteam_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.upsert_user(update.effective_user.id, update.effective_user.username or "")
     if not ctx.args:
