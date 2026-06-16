@@ -1,1426 +1,1049 @@
 """
-MapleStory Guild Boss Scheduler — Discord Bot
-
-Fixes applied:
-- Runs post to the channel where /createrun was executed (guild-scoped), not a global RUNS_CHANNEL_ID
-- @mentions work for players who /register without linking Telegram
-- Scheduler and reminders scoped to the originating channel/guild
-- Telegram cross-notify only fires for actually linked accounts
-- No global slash command pollution — synced only to DISCORD_GUILD_ID
+db.py — PostgreSQL version for Railway
 """
-
 import os
-import logging
-from datetime import datetime, timezone, timedelta
-from typing import List
+import psycopg2
 
-import discord
-from discord import app_commands
-from discord.ext import tasks
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-import db
-
-# ── Config ────────────────────────────────────────────────────────────────────
-
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "YOUR_DISCORD_TOKEN_HERE")
-DISCORD_GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "0"))
-# RUNS_CHANNEL_ID is now optional — used only as a fallback if command is run in DM
-RUNS_CHANNEL_ID = int(os.environ.get("RUNS_CHANNEL_ID", "0"))
-
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
-log = logging.getLogger(__name__)
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-DIFF_EMOJI = {"easy": "🟢", "normal": "🔵", "hard": "🟠", "chaos": "🔴", "extreme": "⚫"}
+BOSSES = [
+    ("Lotus", ["Extreme"]),
+    ("Kalos", ["Normal", "Chaos", "Extreme"]),
+    ("Kaling", ["Normal", "Hard", "Extreme"]),
+    ("First Adversary", ["Normal", "Hard", "Extreme"]),
+    ("Black Mage", ["Normal", "Hard", "Extreme"]),
+    ("Seren", ["Normal", "Hard", "Extreme"]),
+    ("Malefic", ["Normal", "Hard", "Extreme"]),
+    ("Limbo", ["Normal", "Hard"]),
+    ("Baldrix", ["Normal", "Hard"]),
+]
 
 
-def diff_icon(diff):
-    return DIFF_EMOJI.get(diff.lower(), "⚪")
+def get_conn():
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = False
+    return conn
 
 
-def get_run_dt(run):
-    run_dt = run["run_at"]
-    if isinstance(run_dt, str):
-        run_dt = datetime.fromisoformat(run_dt)
-    if run_dt.tzinfo is None:
-        run_dt = run_dt.replace(tzinfo=timezone.utc)
-    return run_dt
+def init_db():
+    conn = get_conn()
+    c = conn.cursor()
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id BIGINT PRIMARY KEY,
+            username TEXT
+        )
+    """)
 
-def progress_bar(step, total=4):
-    return f"`{'█' * step}{'░' * (total - step)}` Step {step}/{total}"
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS characters (
+            id SERIAL PRIMARY KEY,
+            telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
+            ign TEXT NOT NULL UNIQUE,
+            class TEXT,
+            level INTEGER
+        )
+    """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS bosses (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            difficulty TEXT NOT NULL,
+            UNIQUE(name, difficulty)
+        )
+    """)
 
-def auto_register(user: discord.User):
-    """Ensure Discord user exists in discord_users table."""
-    db.upsert_discord_user(user.id, user.name)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            id SERIAL PRIMARY KEY,
+            boss_id INTEGER NOT NULL REFERENCES bosses(id),
+            leader_id BIGINT NOT NULL REFERENCES users(telegram_id),
+            run_at TIMESTAMP NOT NULL,
+            remind_at TIMESTAMP DEFAULT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
 
+    c.execute("""ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()""")
 
-def fmt_run_embed(run, members=None):
-    icon = diff_icon(run["difficulty"])
-    sgt = get_run_dt(run) + timedelta(hours=8)
-    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
-    color_map = {
-        "confirmed": discord.Color.green(),
-        "pending": discord.Color.orange(),
-        "cancelled": discord.Color.red(),
-    }
-    embed = discord.Embed(
-        title=f"⚔️ Run #{run['id']} — {icon} {run['boss_name']} {run['difficulty']}",
-        color=color_map.get(run["status"], discord.Color.blurple()),
-    )
-    embed.add_field(name="📅 Date & Time", value=time_str, inline=True)
-    embed.add_field(name="👑 Leader", value=f"@{run['leader_username']}", inline=True)
-    status_map = {"confirmed": "✅ CONFIRMED", "pending": "⏳ PENDING", "cancelled": "❌ CANCELLED"}
-    embed.add_field(name="📋 Status", value=status_map.get(run["status"], run["status"].upper()), inline=True)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS run_members (
+            id SERIAL PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES runs(id),
+            character_id INTEGER NOT NULL REFERENCES characters(id),
+            accepted SMALLINT DEFAULT 0,
+            UNIQUE(run_id, character_id)
+        )
+    """)
 
-    if members:
-        total = len(members)
-        accepted = sum(1 for m in members if m["accepted"] == 1)
-        lines = []
-        for m in members:
-            icon_m = {1: "✅", -1: "❌", 0: "⏳"}[m["accepted"]]
-            line = f"{icon_m} **{m['ign']}**"
-            if m.get("discord_id"):
-                line += f" (<@{m['discord_id']}>)"
-            lines.append(line)
-        embed.add_field(name=f"👥 Party ({accepted}/{total})", value="\n".join(lines) or "None", inline=False)
+    init_teams_table(conn)
+    init_discord_tables(conn)
+    init_link_table(conn)
 
-    return embed
-
-
-async def _send_telegram(telegram_id: int, text: str, run_id: int = None):
-    """Send a Telegram DM via Bot API."""
-    import httpx
-    tg_token = os.environ.get("BOT_TOKEN")
-    if not tg_token or not telegram_id or telegram_id < 0:
-        return False
-    payload = {"chat_id": telegram_id, "text": text}
-    if run_id:
-        payload["reply_markup"] = {
-            "inline_keyboard": [[
-                {"text": "✅ Accept", "callback_data": f"rsvp_accept_{run_id}"},
-                {"text": "❌ Decline", "callback_data": f"rsvp_decline_{run_id}"},
-            ]]
-        }
-    try:
-        async with httpx.AsyncClient() as c:
-            resp = await c.post(
-                f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                json=payload,
+    for name, difficulties in BOSSES:
+        for diff in difficulties:
+            c.execute(
+                "INSERT INTO bosses (name, difficulty) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (name, diff)
             )
-            return resp.status_code == 200
-    except Exception as e:
-        log.warning(f"Telegram send failed (id:{telegram_id}): {e}")
+
+    conn.commit()
+    conn.close()
+
+
+def _row(cursor, row):
+    if row is None:
+        return None
+    cols = [d[0] for d in cursor.description]
+    return dict(zip(cols, row))
+
+
+def _rows(cursor, rows):
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+# ── Users & Characters ────────────────────────────────────────────────────────
+
+def upsert_user(telegram_id, username):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO users (telegram_id, username) VALUES (%s, %s)
+           ON CONFLICT (telegram_id) DO UPDATE SET username=EXCLUDED.username""",
+        (telegram_id, username)
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_character(telegram_id, ign, cls=None, level=None):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute(
+            "INSERT INTO characters (telegram_id, ign, class, level) VALUES (%s,%s,%s,%s)",
+            (telegram_id, ign, cls, level)
+        )
+        conn.commit()
+        return True
+    except psycopg2.IntegrityError:
+        conn.rollback()
         return False
+    finally:
+        conn.close()
 
 
-async def _notify_all_via_telegram(run_id: int, members, run, text: str, include_buttons=False):
-    """Send Telegram DMs to members who have a real (positive) telegram_id."""
-    notified = []
-    for m in members:
-        char = db.get_character_by_id(m.get("character_id") or m.get("id"))
-        if not char:
-            continue
-        tg_id = char.get("telegram_id")
-        if not tg_id or tg_id < 0:
-            continue
-        ok = await _send_telegram(tg_id, text, run_id if include_buttons else None)
-        if ok:
-            notified.append(m["ign"])
-    return notified
-
-
-async def _update_telegram_invite(run_id, telegram_id, ign, accepted, run):
-    """Notify Telegram that a response was recorded via Discord."""
-    import httpx
-    tg_token = os.environ.get("BOT_TOKEN")
-    if not tg_token or not telegram_id or telegram_id < 0:
-        return
-    sgt = get_run_dt(run) + timedelta(hours=8)
-    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
-    status = "✅ accepted" if accepted == 1 else "❌ declined"
-    msg = (
-        f"ℹ️ Your response has been recorded via Discord.\n\n"
-        f"You {status} Run #{run_id}\n"
-        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-        f"📅 {time_str}"
+def remove_character(telegram_id, ign):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "DELETE FROM characters WHERE telegram_id=%s AND ign=%s",
+        (telegram_id, ign)
     )
+    deleted = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def get_characters(telegram_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM characters WHERE telegram_id=%s ORDER BY ign",
+        (telegram_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def get_all_characters():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ch.*, u.username FROM characters ch
+           JOIN users u ON u.telegram_id=ch.telegram_id
+           ORDER BY ch.ign"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def get_character_by_ign(ign):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ch.*, u.username, u.telegram_id AS owner_tid
+           FROM characters ch
+           JOIN users u ON u.telegram_id=ch.telegram_id
+           WHERE LOWER(ch.ign)=LOWER(%s)""",
+        (ign,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+
+def get_character_by_id(char_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ch.*, u.username FROM characters ch
+           JOIN users u ON u.telegram_id=ch.telegram_id
+           WHERE ch.id=%s""",
+        (char_id,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+
+# ── Bosses ────────────────────────────────────────────────────────────────────
+
+def get_all_bosses():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM bosses ORDER BY name, difficulty")
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def find_boss(name, difficulty):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM bosses WHERE LOWER(name)=LOWER(%s) AND LOWER(difficulty)=LOWER(%s)",
+        (name, difficulty)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+
+# ── Runs ──────────────────────────────────────────────────────────────────────
+
+def create_run(boss_id, leader_id, run_at_iso):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO runs (boss_id, leader_id, run_at) VALUES (%s,%s,%s) RETURNING id",
+        (boss_id, leader_id, run_at_iso)
+    )
+    run_id = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def set_run_reminder(run_id, remind_at_iso):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE runs SET remind_at=%s WHERE id=%s",
+        (remind_at_iso, run_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_run_member(run_id, character_id):
+    conn = get_conn()
+    c = conn.cursor()
     try:
-        async with httpx.AsyncClient() as c:
-            await c.post(
-                f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                json={"chat_id": telegram_id, "text": msg},
+        c.execute(
+            "INSERT INTO run_members (run_id, character_id) VALUES (%s,%s)",
+            (run_id, character_id)
+        )
+        conn.commit()
+        return True
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def set_member_response(run_id, character_id, accepted):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE run_members SET accepted=%s WHERE run_id=%s AND character_id=%s",
+        (accepted, run_id, character_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_run(run_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT r.*, b.name AS boss_name, b.difficulty,
+                  u.username AS leader_username
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           JOIN users u ON u.telegram_id=r.leader_id
+           WHERE r.id=%s""",
+        (run_id,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+
+def get_run_members(run_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT rm.*, ch.ign, ch.class, ch.level,
+                  u.telegram_id, u.username
+           FROM run_members rm
+           JOIN characters ch ON ch.id=rm.character_id
+           JOIN users u ON u.telegram_id=ch.telegram_id
+           WHERE rm.run_id=%s
+           ORDER BY ch.ign""",
+        (run_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def get_run_member_by_char(run_id, character_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM run_members WHERE run_id=%s AND character_id=%s",
+        (run_id, character_id)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+
+def check_and_confirm_run(run_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT accepted FROM run_members WHERE run_id=%s", (run_id,))
+    members = c.fetchall()
+    if not members:
+        conn.close()
+        return False
+    all_accepted = all(m[0] == 1 for m in members)
+    if all_accepted:
+        c.execute("UPDATE runs SET status='confirmed' WHERE id=%s", (run_id,))
+        conn.commit()
+    conn.close()
+    return all_accepted
+
+
+def cancel_run(run_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE runs SET status='cancelled' WHERE id=%s", (run_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_active_runs():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT r.*, b.name AS boss_name, b.difficulty,
+                  u.username AS leader_username
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           JOIN users u ON u.telegram_id=r.leader_id
+           WHERE r.status != 'cancelled'
+           AND r.run_at > NOW()
+           ORDER BY r.run_at"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def get_user_runs(telegram_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT DISTINCT r.*, b.name AS boss_name, b.difficulty,
+                  u.username AS leader_username
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           JOIN users u ON u.telegram_id=r.leader_id
+           JOIN run_members rm ON rm.run_id=r.id
+           JOIN characters ch ON ch.id=rm.character_id
+           WHERE ch.telegram_id=%s
+           AND r.status != 'cancelled'
+           AND r.run_at > NOW()
+           ORDER BY r.run_at""",
+        (telegram_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def get_runs_due_for_reminder():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT r.*, b.name AS boss_name, b.difficulty
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           WHERE r.status='confirmed'
+           AND r.remind_at IS NOT NULL
+           AND r.remind_at <= NOW()
+           AND r.remind_at > NOW() - INTERVAL '30 minutes'
+           AND r.run_at > NOW()"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def get_expired_pending_runs(hours=12):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT r.*, b.name AS boss_name, b.difficulty
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           WHERE r.status='pending'
+           AND r.created_at <= NOW() - INTERVAL '%s hours'""",
+        (hours,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def update_run_time(run_id, run_at_iso):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE runs SET run_at=%s, remind_at=NULL, status='pending' WHERE id=%s",
+        (run_at_iso, run_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def reset_run_members(run_id, new_char_ids):
+    """Replace all members of a run and reset acceptances."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM run_members WHERE run_id=%s", (run_id,))
+    for char_id in new_char_ids:
+        try:
+            c.execute(
+                "INSERT INTO run_members (run_id, character_id) VALUES (%s,%s)",
+                (run_id, char_id)
             )
-    except Exception as e:
-        log.warning(f"Telegram update failed for {ign}: {e}")
-
-
-async def _notify_via_telegram(run_id: int, members, run, data):
-    """Send Telegram DM invites to members who have a real telegram_id linked."""
-    import httpx
-    tg_token = os.environ.get("BOT_TOKEN")
-    if not tg_token:
-        return [], []
-
-    sgt = get_run_dt(run) + timedelta(hours=8)
-    time_str = sgt.strftime("%d/%m/%Y %H:%M SGT")
-    reminder_str = data.get("reminder_label", "8:00 AM SGT on the day of the run")
-
-    notified = []
-    skipped = []
-
-    for m in members:
-        char = db.get_character_by_id(m["character_id"] if "character_id" in m else m["id"])
-        if not char:
-            continue
-        tg_id = char.get("telegram_id")
-        if not tg_id or tg_id < 0:
-            skipped.append(m["ign"])
-            continue
-
-        all_members = db.get_run_members_discord(run_id)
-        party_lines = "\n".join(
-            f"  {'✅' if mbr['accepted']==1 else '⏳' if mbr['accepted']==0 else '❌'} {mbr['ign']}"
-            for mbr in all_members
-        )
-        invite_text = (
-            f"📨 You've been invited to a boss run (via Discord)!\n\n"
-            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-            f"📅 {time_str}\n"
-            f"⏰ Reminder: {reminder_str}\n\n"
-            f"Your character: {m['ign']}\n\n"
-            f"👥 Party:\n{party_lines}\n\n"
-            f"Tap the buttons below to respond:"
-        )
-        try:
-            async with httpx.AsyncClient() as client_http:
-                resp = await client_http.post(
-                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                    json={
-                        "chat_id": tg_id,
-                        "text": invite_text,
-                        "reply_markup": {
-                            "inline_keyboard": [[
-                                {"text": "✅ Accept", "callback_data": f"rsvp_accept_{run_id}"},
-                                {"text": "❌ Decline", "callback_data": f"rsvp_decline_{run_id}"},
-                            ]]
-                        },
-                    },
-                )
-                if resp.status_code == 200:
-                    notified.append(m["ign"])
-                    log.info(f"Telegram DM sent to {m['ign']} (tg_id:{tg_id})")
-                else:
-                    log.warning(f"Telegram notify failed for {m['ign']}: {resp.text}")
-                    skipped.append(m["ign"])
-        except Exception as e:
-            log.warning(f"Telegram notify error for {m['ign']}: {e}")
-            skipped.append(m["ign"])
-
-    return notified, skipped
-
-
-async def _post_to_channel(bot, channel_id: int, content, embed=None, view=None):
-    """Post to a specific channel by ID."""
-    if not channel_id:
-        return None
-    ch = bot.get_channel(channel_id)
-    if not ch:
-        return None
-    try:
-        kwargs = {"content": content}
-        if embed:
-            kwargs["embed"] = embed
-        if view:
-            kwargs["view"] = view
-        return await ch.send(**kwargs)
-    except discord.Forbidden:
-        log.warning(f"Missing permissions in channel {channel_id}")
-    except Exception as e:
-        log.warning(f"Could not post to channel {channel_id}: {e}")
-    return None
-
-
-async def _update_run_message(bot, run, embed, view=discord.utils.MISSING, content=None):
-    if run.get("discord_message_id") and run.get("discord_channel_id"):
-        try:
-            ch = bot.get_channel(run["discord_channel_id"])
-            if not ch:
-                return
-            msg = await ch.fetch_message(run["discord_message_id"])
-            kwargs = {"embed": embed}
-            if view is not discord.utils.MISSING:
-                kwargs["view"] = view
-            if content:
-                kwargs["content"] = content
-            await msg.edit(**kwargs)
-        except Exception as e:
-            log.warning(f"Could not update run message: {e}")
-
-
-# ── Reusable buttons ──────────────────────────────────────────────────────────
-
-class BackButton(discord.ui.Button):
-    def __init__(self, callback_fn, row=1):
-        super().__init__(label="◀ Back", style=discord.ButtonStyle.secondary, row=row)
-        self._cb = callback_fn
-
-    async def callback(self, interaction: discord.Interaction):
-        rd = getattr(self.view, "run_data", {})
-        if rd.get("creator_id") and interaction.user.id != rd["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        await self._cb(interaction)
-
-
-class CancelButton(discord.ui.Button):
-    def __init__(self, row=1):
-        super().__init__(label="❌ Cancel", style=discord.ButtonStyle.danger, row=row)
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(content="❌ Run creation cancelled.", view=None)
-
-
-# ── RSVP ──────────────────────────────────────────────────────────────────────
-
-def make_rsvp_view(run_id: int) -> discord.ui.View:
-    view = discord.ui.View(timeout=None)
-    accept_btn = discord.ui.Button(
-        label="✅ Accept", style=discord.ButtonStyle.success,
-        custom_id=f"rsvp_accept_{run_id}",
-    )
-    decline_btn = discord.ui.Button(
-        label="❌ Decline", style=discord.ButtonStyle.danger,
-        custom_id=f"rsvp_decline_{run_id}",
-    )
-
-    async def on_accept(interaction: discord.Interaction):
-        await handle_rsvp(interaction, run_id, accepted=1)
-
-    async def on_decline(interaction: discord.Interaction):
-        await handle_rsvp(interaction, run_id, accepted=-1)
-
-    accept_btn.callback = on_accept
-    decline_btn.callback = on_decline
-    view.add_item(accept_btn)
-    view.add_item(decline_btn)
-    return view
-
-
-async def handle_rsvp(interaction: discord.Interaction, run_id: int, accepted: int):
-    await interaction.response.defer(ephemeral=True)
-    auto_register(interaction.user)
-
-    run = db.get_run(run_id)
-    if not run:
-        await interaction.followup.send(f"⚠️ Run #{run_id} not found.", ephemeral=True)
-        return
-
-    if run["status"] == "confirmed":
-        await interaction.followup.send(
-            f"ℹ️ Run #{run_id} is already confirmed — no further responses needed.",
-            ephemeral=True,
-        )
-        return
-
-    if run["status"] == "cancelled":
-        try:
-            cancelled_embed = fmt_run_embed(run, db.get_run_members_discord(run_id))
-            cancelled_embed.set_footer(text="❌ This run has been cancelled")
-            await _update_run_message(interaction.client, run, cancelled_embed, view=None)
         except Exception:
             pass
-        await interaction.followup.send(
-            f"⚠️ Run #{run_id} has been cancelled.",
-            ephemeral=True,
+    c.execute("UPDATE runs SET status='pending' WHERE id=%s", (run_id,))
+    conn.commit()
+    conn.close()
+
+
+# ── Discord Users ─────────────────────────────────────────────────────────────
+
+def init_discord_tables(conn=None):
+    close = conn is None
+    if conn is None:
+        conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS discord_users (
+            discord_id BIGINT PRIMARY KEY,
+            username TEXT,
+            telegram_id BIGINT REFERENCES users(telegram_id) DEFAULT NULL
         )
-        return
+    """)
+
+    c.execute("""
+        ALTER TABLE characters
+        ADD COLUMN IF NOT EXISTS discord_id BIGINT DEFAULT NULL
+    """)
+
+    c.execute("""
+        ALTER TABLE runs
+        ADD COLUMN IF NOT EXISTS discord_message_id BIGINT DEFAULT NULL
+    """)
+
+    c.execute("""
+        ALTER TABLE runs
+        ADD COLUMN IF NOT EXISTS discord_channel_id BIGINT DEFAULT NULL
+    """)
+
+    # guild_id so notifications are scoped to the server the run was created in
+    c.execute("""
+        ALTER TABLE runs
+        ADD COLUMN IF NOT EXISTS discord_guild_id BIGINT DEFAULT NULL
+    """)
+
+    conn.commit()
+    if close:
+        conn.close()
+
+
+def upsert_discord_user(discord_id, username):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO discord_users (discord_id, username)
+           VALUES (%s, %s)
+           ON CONFLICT (discord_id) DO UPDATE SET username=EXCLUDED.username""",
+        (discord_id, username)
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_character_discord(discord_id, ign, cls=None, level=None):
+    """Register a character linked to a Discord user.
+
+    discord_id is always stored on the character so @mentions work immediately —
+    no Telegram link required.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+
+    # Determine owner telegram_id: real link if available, else placeholder
+    c.execute(
+        "SELECT telegram_id FROM discord_users WHERE discord_id=%s AND telegram_id IS NOT NULL AND telegram_id > 0",
+        (discord_id,)
+    )
+    row = c.fetchone()
+    owner_tid = row[0] if row else -discord_id
+
+    # Ensure user row exists (placeholder or real)
+    c.execute(
+        "INSERT INTO users (telegram_id, username) VALUES (%s, %s) ON CONFLICT (telegram_id) DO NOTHING",
+        (owner_tid, f"discord:{discord_id}")
+    )
 
-    rm = db.get_run_member_by_discord(run_id, interaction.user.id)
-    if not rm:
-        await interaction.followup.send("⚠️ You're not invited to this run.", ephemeral=True)
-        return
-
-    db.set_member_response(run_id, rm["character_id"], accepted)
-    members = db.get_run_members_discord(run_id)
-
-    # Notify Telegram that response was recorded
-    char = db.get_character_by_id(rm["character_id"])
-    if char and char.get("telegram_id") and char["telegram_id"] > 0:
-        await _update_telegram_invite(run_id, char["telegram_id"], rm["ign"], accepted, run)
-
-    # Resolve the channel to post updates to — use originating channel, fallback to RUNS_CHANNEL_ID
-    target_channel_id = run.get("discord_channel_id") or RUNS_CHANNEL_ID
-
-    if accepted == 1:
-        all_confirmed = db.check_and_confirm_run(run_id)
-        if all_confirmed:
-            run = db.get_run(run_id)
-            embed = fmt_run_embed(run, members)
-            embed.title = f"🎉 Run #{run_id} CONFIRMED! — {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}"
-            embed.color = discord.Color.green()
-            embed.set_footer(text="✅ All members confirmed — buttons removed")
-
-            await _update_run_message(interaction.client, run, embed, view=None)
-
-            mentions = " ".join(f"<@{m['discord_id']}>" for m in members if m.get("discord_id"))
-            await _post_to_channel(
-                interaction.client, target_channel_id,
-                f"🎉 **Run #{run_id} is CONFIRMED!** {mentions}", embed=embed,
-            )
-
-            sgt_c = get_run_dt(run) + timedelta(hours=8)
-            tg_msg_c = (
-                f"🎉 Run #{run_id} is CONFIRMED! All members accepted.\n\n"
-                f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-                f"📅 {sgt_c.strftime('%d/%m/%Y %H:%M SGT')}\n\n"
-                f"See you there!"
-            )
-            await _notify_all_via_telegram(run_id, members, run, tg_msg_c)
-
-            await interaction.followup.send(
-                f"✅ **Run #{run_id} is CONFIRMED!** All members accepted.",
-                ephemeral=True,
-            )
-        else:
-            pending = [m for m in members if m["accepted"] == 0]
-            accepted_count = sum(1 for m in members if m["accepted"] == 1)
-            updated_embed = fmt_run_embed(run, members)
-            updated_embed.set_footer(text=f"✅ {rm['ign']} just accepted · {accepted_count}/{len(members)} confirmed")
-            await _update_run_message(interaction.client, run, updated_embed, view=make_rsvp_view(run_id))
-            await interaction.followup.send(
-                f"✅ **You accepted Run #{run_id}!** ({accepted_count}/{len(members)} confirmed)\n"
-                f"Still waiting on: {', '.join(m['ign'] for m in pending)}",
-                ephemeral=True,
-            )
-    else:
-        db.cancel_run(run_id)
-        run = db.get_run(run_id)
-        sgt = get_run_dt(run) + timedelta(hours=8)
-        mentions = " ".join(f"<@{m['discord_id']}>" for m in members if m.get("discord_id"))
-        cancel_text = (
-            f"❌ **Run #{run_id} has been cancelled.**\n"
-            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-            f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}\n"
-            f"{rm['ign']} (<@{interaction.user.id}>) declined."
-        )
-        await _update_run_message(
-            interaction.client, run, fmt_run_embed(run, members),
-            view=None, content=cancel_text,
-        )
-        await _post_to_channel(
-            interaction.client, target_channel_id,
-            f"{cancel_text}\n{mentions}",
-        )
-
-        tg_decline_msg = (
-            f"❌ Run #{run_id} has been cancelled.\n\n"
-            f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-            f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}\n"
-            f"{rm['ign']} declined on Discord."
-        )
-        await _notify_all_via_telegram(run_id, members, run, tg_decline_msg)
-
-        await interaction.followup.send(
-            f"❌ **You declined Run #{run_id}.** The run has been cancelled and all members notified.",
-            ephemeral=True,
-        )
-
-
-# ── Date/time modal ────────────────────────────────────────────────────────────
-
-class DatePickerPromptView(discord.ui.View):
-    def __init__(self, run_data: dict):
-        super().__init__(timeout=300)
-        self.run_data = run_data
-
-    @discord.ui.button(label="📅 Set Date & Time", style=discord.ButtonStyle.primary)
-    async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        await interaction.response.send_modal(DateTimeModal(self.run_data))
-
-    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="❌ Run creation cancelled.", view=None)
-
-
-class DateTimeModal(discord.ui.Modal, title="Set Run Date & Time (SGT)"):
-    date = discord.ui.TextInput(label="Date (DD/MM/YYYY)", placeholder="28/06/2026", max_length=10)
-    time = discord.ui.TextInput(label="Time (HH:MM, 24h SGT)", placeholder="21:00", max_length=5)
-
-    def __init__(self, run_data: dict):
-        super().__init__()
-        self.run_data = run_data
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            naive = datetime.strptime(f"{self.date.value} {self.time.value}", "%d/%m/%Y %H:%M")
-        except ValueError:
-            await interaction.response.send_message(
-                "⚠️ Invalid format. Use DD/MM/YYYY and HH:MM.", ephemeral=True
-            )
-            return
-
-        sgt_tz = timezone(timedelta(hours=8))
-        sgt_dt = naive.replace(tzinfo=sgt_tz)
-        if sgt_dt <= datetime.now(sgt_tz):
-            await interaction.response.send_message("⚠️ That date/time is in the past.", ephemeral=True)
-            return
-
-        self.run_data["run_at_iso"] = sgt_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        self.run_data["time_str"] = sgt_dt.strftime("%d/%m/%Y %H:%M SGT")
-
-        # Set 8am SGT reminder on run day (skip if same day)
-        now_sgt = datetime.now(sgt_tz)
-        run_8am = sgt_dt.replace(hour=8, minute=0, second=0, microsecond=0)
-        if run_8am.date() > now_sgt.date():
-            self.run_data["reminder_8am_iso"] = run_8am.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            self.run_data["reminder_label"] = "8:00 AM SGT on the day of the run"
-        else:
-            self.run_data["reminder_8am_iso"] = None
-            self.run_data["reminder_label"] = "None (same-day run)"
-
-        if self.run_data.get("selected_chars"):
-            chars = [db.get_character_by_id(cid) for cid in self.run_data["selected_chars"]]
-            platform_map = db.get_character_platform_info(self.run_data["selected_chars"])
-            member_lines = [f"• {ch['ign']} [{platform_map.get(ch['id'], '⚠️')}]" for ch in chars if ch]
-            view = ConfirmRunView(self.run_data)
-            await interaction.response.send_message(
-                f"{progress_bar(4)}\n\n📋 **Run Summary — Please confirm:**\n\n"
-                f"⚔️ {diff_icon(self.run_data['difficulty'])} **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n"
-                f"📅 {self.run_data['time_str']}\n"
-                f"⏰ Reminder: {self.run_data.get('reminder_label', '8:00 AM SGT on the day of the run')}\n\n"
-                f"👥 Party ({len(chars)}):\n" + "\n".join(member_lines),
-                view=view, ephemeral=True,
-            )
-        else:
-            view = MemberSelectView(self.run_data)
-            await interaction.response.send_message(
-                f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**"
-                f" — {self.run_data['time_str']}\n\n👥 Select party members:",
-                view=view, ephemeral=True,
-            )
-
-
-# ── Step 1: Boss ──────────────────────────────────────────────────────────────
-
-class BossSelectView(discord.ui.View):
-    def __init__(self, boss_map: dict, creator_id: int, recent=None):
-        super().__init__(timeout=300)
-        self.run_data = {"boss_map": boss_map, "creator_id": creator_id}
-
-        options = []
-        seen = set()
-        if recent:
-            for r in recent:
-                key = f"{r['name']}||{r['difficulty']}"
-                if key not in seen and r["name"] in boss_map:
-                    options.append(discord.SelectOption(
-                        label=f"⭐ {r['name']} — {r['difficulty']}",
-                        value=f"recent||{r['name']}||{r['difficulty']}",
-                        description="Recently scheduled",
-                    ))
-                    seen.add(key)
-        for name in boss_map:
-            options.append(discord.SelectOption(label=name, value=name))
-
-        select = discord.ui.Select(placeholder="Choose a boss...", options=options[:25])
-        select.callback = self.on_select
-        self.add_item(select)
-        self.add_item(CancelButton())
-
-    async def on_select(self, interaction: discord.Interaction):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        val = interaction.data["values"][0]
-        if val.startswith("recent||"):
-            _, boss_name, difficulty = val.split("||")
-            self.run_data["boss_name"] = boss_name
-            self.run_data["difficulty"] = difficulty
-            teams = db.get_all_teams()
-            view = MethodSelectView(self.run_data) if teams else MemberSelectView(self.run_data)
-            label = "How would you like to add members?" if teams else "👥 Select party members:"
-            await interaction.response.edit_message(
-                content=f"{progress_bar(2)}\n\n⚔️ **{boss_name} {difficulty}**\n\n{label}",
-                view=view,
-            )
-            return
-
-        self.run_data["boss_name"] = val
-        view = DiffSelectView(self.run_data)
-        await interaction.response.edit_message(
-            content=f"{progress_bar(2)}\n\nBoss: **{self.run_data['boss_name']}**\n\n🎯 Select difficulty:",
-            view=view,
-        )
-
-
-# ── Step 2: Difficulty ────────────────────────────────────────────────────────
-
-class DiffSelectView(discord.ui.View):
-    def __init__(self, run_data: dict):
-        super().__init__(timeout=300)
-        self.run_data = run_data
-
-        diffs = run_data["boss_map"][run_data["boss_name"]]
-        options = [discord.SelectOption(label=f"{diff_icon(d)} {d}", value=d) for d in diffs]
-        select = discord.ui.Select(placeholder="Choose difficulty...", options=options)
-        select.callback = self.on_select
-        self.add_item(select)
-        self.add_item(BackButton(self._go_back))
-        self.add_item(CancelButton())
-
-    async def _go_back(self, interaction: discord.Interaction):
-        view = BossSelectView(self.run_data["boss_map"], self.run_data["creator_id"])
-        await interaction.response.edit_message(
-            content=f"{progress_bar(1)}\n\n⚔️ Select a boss:", view=view
-        )
-
-    async def on_select(self, interaction: discord.Interaction):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        self.run_data["difficulty"] = interaction.data["values"][0]
-        teams = db.get_all_teams()
-        if teams:
-            view = MethodSelectView(self.run_data)
-            await interaction.response.edit_message(
-                content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 How would you like to add members?",
-                view=view,
-            )
-        else:
-            view = MemberSelectView(self.run_data)
-            await interaction.response.edit_message(
-                content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 Select party members:",
-                view=view,
-            )
-
-
-# ── Step 3: Method ────────────────────────────────────────────────────────────
-
-class MethodSelectView(discord.ui.View):
-    def __init__(self, run_data: dict):
-        super().__init__(timeout=300)
-        self.run_data = run_data
-
-    @discord.ui.button(label="👥 Load from Team", style=discord.ButtonStyle.primary, row=0)
-    async def load_team(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        teams = db.get_all_teams()
-        options = [
-            discord.SelectOption(
-                label=t["name"],
-                value=str(t["id"]),
-                description=(", ".join(m["ign"] for m in db.get_team_members(t["id"])))[:100],
-            )
-            for t in teams
-        ]
-        select = discord.ui.Select(placeholder="Choose a team...", options=options[:25])
-        view = discord.ui.View(timeout=300)
-        run_data = self.run_data
-
-        async def on_team_select(inter: discord.Interaction):
-            if inter.user.id != run_data["creator_id"]:
-                await inter.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-                return
-            team_id = int(inter.data["values"][0])
-            members = db.get_team_members(team_id)
-            run_data["selected_chars"] = [m["id"] for m in members]
-            await inter.response.send_modal(DateTimeModal(run_data))
-
-        select.callback = on_team_select
-        view.add_item(select)
-        view.add_item(BackButton(self._go_back))
-        view.add_item(CancelButton())
-        await interaction.response.edit_message(
-            content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n📋 Select a preset team:",
-            view=view,
-        )
-
-    @discord.ui.button(label="👤 Select Individually", style=discord.ButtonStyle.secondary, row=0)
-    async def select_individual(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        view = MemberSelectView(self.run_data)
-        await interaction.response.edit_message(
-            content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 Select party members:",
-            view=view,
-        )
-
-    async def _go_back(self, interaction: discord.Interaction):
-        view = DiffSelectView(self.run_data)
-        await interaction.response.edit_message(
-            content=f"{progress_bar(2)}\n\nBoss: **{self.run_data['boss_name']}**\n\n🎯 Select difficulty:",
-            view=view,
-        )
-
-    @discord.ui.button(label="◀ Back", style=discord.ButtonStyle.secondary, row=1)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        await self._go_back(interaction)
-
-    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger, row=1)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="❌ Run creation cancelled.", view=None)
-
-
-# ── Step 3b: Individual member picker ─────────────────────────────────────────
-
-class MemberSelectView(discord.ui.View):
-    def __init__(self, run_data: dict):
-        super().__init__(timeout=300)
-        self.run_data = run_data
-
-        all_chars = db.get_all_characters_discord()
-        char_ids = [ch["id"] for ch in all_chars]
-        platform_map = db.get_character_platform_info(char_ids)
-        options = [
-            discord.SelectOption(
-                label=f"{ch['ign']}" + (f" Lv.{ch['level']}" if ch["level"] else ""),
-                value=str(ch["id"]),
-                description=f"{ch['class'] or 'No class'} [{platform_map.get(ch['id'], '⚠️')}]",
-            )
-            for ch in all_chars[:25]
-        ]
-        select = discord.ui.Select(
-            placeholder="Select party members...",
-            min_values=1,
-            max_values=min(len(options), 25),
-            options=options,
-        )
-        select.callback = self.on_select
-        self.add_item(select)
-        self.add_item(BackButton(self._go_back))
-        self.add_item(CancelButton())
-
-    async def on_select(self, interaction: discord.Interaction):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        selected_ids = [int(v) for v in interaction.data["values"]]
-        self.run_data["selected_chars"] = selected_ids
-
-        all_chars = db.get_all_characters_discord()
-        char_map = {ch["id"]: ch for ch in all_chars}
-        unlinked = [char_map[cid]["ign"] for cid in selected_ids if cid in char_map and not char_map[cid].get("discord_id")]
-
-        if unlinked:
-            warning = (
-                f"⚠️ **Heads up:** {', '.join(unlinked)} have no Discord account linked — "
-                f"they won't see the invite on Discord. They can still be notified via Telegram if accounts are linked."
-            )
-            await interaction.response.send_message(warning, ephemeral=True)
-            view = DatePickerPromptView(self.run_data)
-            await interaction.followup.send(
-                f"{progress_bar(4)}\n\nSet the date and time for this run:",
-                view=view, ephemeral=True,
-            )
-        else:
-            await interaction.response.send_modal(DateTimeModal(self.run_data))
-
-    async def _go_back(self, interaction: discord.Interaction):
-        teams = db.get_all_teams()
-        if teams:
-            view = MethodSelectView(self.run_data)
-            await interaction.response.edit_message(
-                content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 How would you like to add members?",
-                view=view,
-            )
-        else:
-            view = DiffSelectView(self.run_data)
-            await interaction.response.edit_message(
-                content=f"{progress_bar(2)}\n\nBoss: **{self.run_data['boss_name']}**\n\n🎯 Select difficulty:",
-                view=view,
-            )
-
-
-# ── Step 4: Confirm ───────────────────────────────────────────────────────────
-
-class ConfirmRunView(discord.ui.View):
-    def __init__(self, run_data: dict):
-        super().__init__(timeout=300)
-        self.run_data = run_data
-
-    @discord.ui.button(label="✅ Confirm & Post", style=discord.ButtonStyle.success, row=0)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-
-        data = self.run_data
-        boss = db.find_boss(data["boss_name"], data["difficulty"])
-        run_id = db.create_run_discord(boss["id"], interaction.user.id, data["run_at_iso"])
-
-        for char_id in data["selected_chars"]:
-            db.add_run_member(run_id, char_id)
-
-        if data.get("reminder_8am_iso"):
-            db.set_run_reminder(run_id, data["reminder_8am_iso"])
-
-        run = db.get_run(run_id)
-        members = db.get_run_members_discord(run_id)
-        embed = fmt_run_embed(run, members)
-        view = make_rsvp_view(run_id)
-
-        linked = [m for m in members if m.get("discord_id")]
-        unlinked = [m for m in members if not m.get("discord_id")]
-        mentions = " ".join(f"<@{m['discord_id']}>" for m in linked)
-
-        # Post to the channel where /createrun was invoked, NOT a global channel
-        # interaction.channel is the channel the slash command was used in
-        target_channel = interaction.channel
-        guild_id = interaction.guild_id
-
-        # Fall back to configured RUNS_CHANNEL_ID if somehow channel is unavailable
-        if target_channel is None and RUNS_CHANNEL_ID:
-            target_channel = interaction.client.get_channel(RUNS_CHANNEL_ID)
-
-        if target_channel:
-            try:
-                msg = await target_channel.send(
-                    content=(
-                        f"📢 **New Boss Run!** {mentions}\n"
-                        f"⏰ Reminder: {data.get('reminder_label', '8:00 AM SGT')}\n"
-                        f"Accept or decline below:"
-                    ),
-                    embed=embed,
-                    view=view,
-                )
-                db.set_run_discord_message(run_id, msg.id, target_channel.id, guild_id)
-
-                tg_notified, tg_skipped = await _notify_via_telegram(run_id, members, run, data)
-
-                summary = (
-                    f"✅ **Run #{run_id} created and posted!** Check <#{target_channel.id}>\n"
-                    f"To edit: `/editrun {run_id}` · To cancel: `/cancelrun {run_id}`"
-                )
-                if tg_notified:
-                    summary += f"\n📱 Telegram notified: {', '.join(tg_notified)}"
-                if unlinked:
-                    names = ", ".join(m["ign"] for m in unlinked)
-                    summary += (
-                        f"\n\n⚠️ **No Discord link:** {names}\n"
-                        f"They can only accept/decline via Telegram."
-                    )
-                if tg_skipped and not tg_notified:
-                    summary += f"\n\n💡 Members can link Telegram with `/linkaccount` for cross-platform invites."
-
-                await interaction.edit_original_response(content=summary, view=None)
-
-            except discord.Forbidden:
-                await interaction.followup.send(
-                    "⚠️ Bot lacks permission to post in this channel.\n"
-                    "Go to the channel → Edit Channel → Permissions → add the bot with **Send Messages** + **Embed Links**.",
-                    ephemeral=True,
-                )
-        else:
-            await interaction.followup.send(
-                "⚠️ Could not find a channel to post in. Make sure `RUNS_CHANNEL_ID` is set or use this command in a server channel.",
-                ephemeral=True,
-            )
-
-    @discord.ui.button(label="◀ Back", style=discord.ButtonStyle.secondary, row=0)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.run_data["creator_id"]:
-            await interaction.response.send_message("⚠️ Only the run creator can use this.", ephemeral=True)
-            return
-        view = MemberSelectView(self.run_data)
-        bosses = db.get_all_bosses()
-        grouped = {}
-        for b in bosses:
-            grouped.setdefault(b["name"], []).append(b["difficulty"])
-        self.run_data["boss_map"] = grouped
-        await interaction.response.edit_message(
-            content=f"{progress_bar(3)}\n\n⚔️ **{self.run_data['boss_name']} {self.run_data['difficulty']}**\n\n👥 Select party members:",
-            view=view,
-        )
-
-    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger, row=0)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="❌ Run creation cancelled.", view=None)
-
-
-# ── Bot client ────────────────────────────────────────────────────────────────
-
-class MapleBot(discord.Client):
-    def __init__(self):
-        intents = discord.Intents.default()
-        super().__init__(intents=intents)
-        self.tree = app_commands.CommandTree(self)
-
-    async def setup_hook(self):
-        # Re-register persistent RSVP handlers for pending runs on restart
-        active_runs = db.get_active_runs_discord()
-        pending_runs = [r for r in active_runs if r["status"] == "pending"]
-        for run in pending_runs:
-            self.add_view(make_rsvp_view(run["id"]))
-        log.info(f"Re-registered RSVP views for {len(pending_runs)} pending runs")
-
-        # Sync ONLY to the configured guild — avoids leaking commands to other servers
-        if DISCORD_GUILD_ID:
-            guild = discord.Object(id=DISCORD_GUILD_ID)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            log.info(f"Slash commands synced to guild {DISCORD_GUILD_ID}")
-        else:
-            # No guild configured — sync globally as fallback
-            await self.tree.sync()
-            log.info("Slash commands synced globally (no DISCORD_GUILD_ID set)")
-
-        scheduler_loop.start()
-
-    async def on_ready(self):
-        log.info(f"🍄 Discord bot ready as {self.user}")
-        await self.change_presence(activity=discord.Game(name="/help for commands"))
-
-    async def on_guild_join(self, guild: discord.Guild):
-        # Only sync if this is our configured guild
-        if DISCORD_GUILD_ID and guild.id == DISCORD_GUILD_ID:
-            try:
-                self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
-                log.info(f"Commands synced to guild: {guild.name} ({guild.id})")
-            except Exception as e:
-                log.warning(f"Failed to sync commands to {guild.name}: {e}")
-
-
-client = MapleBot()
-
-
-# ── Scheduler ─────────────────────────────────────────────────────────────────
-
-@tasks.loop(minutes=1)
-async def scheduler_loop():
-    """Check for reminders and expired pending runs every minute."""
     try:
-        # Reminders for confirmed runs
-        due = db.get_runs_due_for_reminder_discord()
-        for run in due:
-            channel_id = run.get("discord_channel_id")
-            if not channel_id:
-                continue
-            ch = client.get_channel(channel_id)
-            if not ch:
-                continue
-            members = db.get_run_members_discord(run["id"])
-            mentions = " ".join(f"<@{m['discord_id']}>" for m in members if m.get("discord_id"))
-            sgt = get_run_dt(run) + timedelta(hours=8)
-            await ch.send(
-                f"⏰ **Reminder — Run #{run['id']} starts soon!** {mentions}\n"
-                f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']} — {sgt.strftime('%d/%m/%Y %H:%M SGT')}"
+        c.execute(
+            "INSERT INTO characters (telegram_id, ign, class, level, discord_id) VALUES (%s, %s, %s, %s, %s)",
+            (owner_tid, ign, cls, level, discord_id)
+        )
+        conn.commit()
+        return True
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def get_characters_discord(discord_id):
+    """Get characters registered by a Discord user."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM characters WHERE discord_id=%s ORDER BY ign",
+        (discord_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def get_character_by_ign_discord(ign):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ch.*, du.discord_id as owner_discord_id, du.username as discord_username
+           FROM characters ch
+           LEFT JOIN discord_users du ON du.discord_id=ch.discord_id
+           WHERE LOWER(ch.ign)=LOWER(%s)""",
+        (ign,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+
+def get_all_characters_discord():
+    """All characters with discord info."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ch.*,
+                  du.discord_id as owner_discord_id,
+                  du.username as discord_username
+           FROM characters ch
+           LEFT JOIN discord_users du ON du.discord_id=ch.discord_id
+           ORDER BY ch.ign"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def set_run_discord_message(run_id, message_id, channel_id, guild_id=None):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE runs SET discord_message_id=%s, discord_channel_id=%s, discord_guild_id=%s WHERE id=%s",
+        (message_id, channel_id, guild_id, run_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_run_members_discord(run_id):
+    """Run members with discord IDs for mentions."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT rm.*, rm.character_id,
+                  ch.ign, ch.class, ch.level,
+                  ch.discord_id, du.username as discord_username
+           FROM run_members rm
+           JOIN characters ch ON ch.id=rm.character_id
+           LEFT JOIN discord_users du ON du.discord_id=ch.discord_id
+           WHERE rm.run_id=%s
+           ORDER BY ch.ign""",
+        (run_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def get_run_member_by_discord(run_id, discord_id):
+    """Find a run member by discord_id."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT rm.*, rm.character_id, ch.ign
+           FROM run_members rm
+           JOIN characters ch ON ch.id=rm.character_id
+           WHERE rm.run_id=%s AND ch.discord_id=%s
+           LIMIT 1""",
+        (run_id, discord_id)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
+
+
+def get_user_runs_discord(discord_id):
+    """Runs where this Discord user's characters are invited."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT DISTINCT r.*, b.name AS boss_name, b.difficulty,
+                  u.username AS leader_username, r.discord_message_id, r.discord_channel_id
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           JOIN users u ON u.telegram_id=r.leader_id
+           JOIN run_members rm ON rm.run_id=r.id
+           JOIN characters ch ON ch.id=rm.character_id
+           WHERE ch.discord_id=%s
+           AND r.status != 'cancelled'
+           AND r.run_at > NOW()
+           ORDER BY r.run_at""",
+        (discord_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def get_active_runs_discord():
+    """All active runs with discord message info."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT r.*, b.name AS boss_name, b.difficulty,
+                  u.username AS leader_username,
+                  r.discord_message_id, r.discord_channel_id, r.discord_guild_id
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           JOIN users u ON u.telegram_id=r.leader_id
+           WHERE r.status != 'cancelled'
+           AND r.run_at > NOW()
+           ORDER BY r.run_at"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+def create_run_discord(boss_id, discord_id, run_at_iso):
+    """Create a run from Discord."""
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute(
+        "SELECT telegram_id FROM discord_users WHERE discord_id=%s AND telegram_id IS NOT NULL AND telegram_id > 0",
+        (discord_id,)
+    )
+    row = c.fetchone()
+    owner_tid = row[0] if row else -discord_id
+
+    if owner_tid < 0:
+        c.execute(
+            "INSERT INTO users (telegram_id, username) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (owner_tid, f"discord:{discord_id}")
+        )
+
+    c.execute(
+        "INSERT INTO runs (boss_id, leader_id, run_at) VALUES (%s,%s,%s) RETURNING id",
+        (boss_id, owner_tid, run_at_iso)
+    )
+    run_id = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def get_runs_due_for_reminder_discord():
+    """Confirmed runs with discord channel info due for reminder."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT r.*, b.name AS boss_name, b.difficulty,
+                  r.discord_channel_id, r.discord_guild_id
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           WHERE r.status='confirmed'
+           AND r.remind_at IS NOT NULL
+           AND r.remind_at <= NOW()
+           AND r.remind_at > NOW() - INTERVAL '30 minutes'
+           AND r.run_at > NOW()
+           AND r.discord_channel_id IS NOT NULL"""
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
+
+
+# ── Account Linking ───────────────────────────────────────────────────────────
+
+def init_link_table(conn=None):
+    close = conn is None
+    if conn is None:
+        conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS link_codes (
+            code TEXT PRIMARY KEY,
+            telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
+            created_at TIMESTAMP DEFAULT NOW(),
+            used BOOLEAN DEFAULT FALSE
+        )
+    """)
+    conn.commit()
+    if close:
+        conn.close()
+
+
+def create_link_code(telegram_id):
+    """Generate a one-time code for linking Telegram to Discord."""
+    import random, string
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM link_codes WHERE telegram_id=%s AND used=FALSE", (telegram_id,))
+    c.execute(
+        "INSERT INTO link_codes (code, telegram_id) VALUES (%s, %s)",
+        (code, telegram_id)
+    )
+    conn.commit()
+    conn.close()
+    return code
+
+
+def consume_link_code(code, discord_id, discord_username):
+    """
+    Link a Discord account using a one-time code.
+    Returns (telegram_id, error_message).
+    Also migrates any placeholder characters registered before linking.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM link_codes WHERE code=%s AND used=FALSE",
+        (code.upper(),)
+    )
+    row = _row(c, c.fetchone())
+
+    if not row:
+        conn.close()
+        return None, "Invalid or expired code. Generate a new one with /linkdiscord on Telegram."
+
+    from datetime import datetime, timezone, timedelta
+    created = row["created_at"]
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - created > timedelta(minutes=10):
+        conn.close()
+        return None, "Code has expired (10 min limit). Generate a new one with /linkdiscord on Telegram."
+
+    telegram_id = row["telegram_id"]
+
+    c.execute("UPDATE link_codes SET used=TRUE WHERE code=%s", (code.upper(),))
+
+    # Link discord_id to all characters owned by the real telegram_id
+    c.execute(
+        "UPDATE characters SET discord_id=%s WHERE telegram_id=%s",
+        (discord_id, telegram_id)
+    )
+
+    # Migrate placeholder characters (registered via Discord before linking)
+    placeholder_tid = -discord_id
+    c.execute("SELECT id FROM characters WHERE telegram_id=%s", (placeholder_tid,))
+    placeholder_chars = [r[0] for r in c.fetchall()]
+    for char_id in placeholder_chars:
+        try:
+            c.execute(
+                "UPDATE characters SET telegram_id=%s, discord_id=%s WHERE id=%s",
+                (telegram_id, discord_id, char_id)
             )
-            # Clear remind_at so it doesn't fire again
-            db.set_run_reminder(run["id"], None)
+        except Exception:
+            pass  # Skip on IGN conflict — character already merged
 
-        # Auto-cancel pending runs older than 12 hours
-        expired = db.get_expired_pending_runs(hours=12)
-        for run in expired:
-            db.cancel_run(run["id"])
-            channel_id = run.get("discord_channel_id")
-            if channel_id:
-                ch = client.get_channel(channel_id)
-                if ch:
-                    await ch.send(
-                        f"⚠️ **Run #{run['id']} auto-cancelled** — no response within 12 hours.\n"
-                        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}"
-                    )
-
-    except Exception as e:
-        log.warning(f"Scheduler error: {e}")
-
-
-@scheduler_loop.before_loop
-async def before_scheduler():
-    await client.wait_until_ready()
-
-
-# ── Autocomplete helpers ──────────────────────────────────────────────────────
-
-async def autocomplete_my_runs(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[int]]:
-    runs = db.get_user_runs_discord(interaction.user.id)
-    choices = []
-    for r in runs:
-        sgt = get_run_dt(r) + timedelta(hours=8)
-        label = f"#{r['id']} {r['boss_name']} {r['difficulty']} — {sgt.strftime('%d/%m %H:%M')}"
-        if current.lower() in label.lower():
-            choices.append(app_commands.Choice(name=label[:100], value=r["id"]))
-    return choices[:25]
-
-
-async def autocomplete_active_runs(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[int]]:
-    runs = db.get_active_runs_discord()
-    choices = []
-    for r in runs:
-        sgt = get_run_dt(r) + timedelta(hours=8)
-        label = f"#{r['id']} {r['boss_name']} {r['difficulty']} — {sgt.strftime('%d/%m %H:%M')}"
-        if current.lower() in label.lower():
-            choices.append(app_commands.Choice(name=label[:100], value=r["id"]))
-    return choices[:25]
-
-
-# ── Slash Commands ────────────────────────────────────────────────────────────
-
-@client.tree.command(name="start", description="Register yourself with the bot")
-async def slash_start(interaction: discord.Interaction):
-    auto_register(interaction.user)
-    await interaction.response.send_message(
-        "🍄 **MapleStory Boss Scheduler**\n\nYou're registered!\n\n"
-        "`/register` — add your character\n"
-        "`/linkaccount` — link your Telegram account\n"
-        "`/bosses` — see available bosses\n"
-        "`/createrun` — create a boss run\n"
-        "`/runs` — see upcoming runs\n"
-        "`/help` — all commands",
-        ephemeral=True,
+    # Upsert discord user linked to telegram
+    c.execute(
+        """INSERT INTO discord_users (discord_id, username, telegram_id)
+           VALUES (%s, %s, %s)
+           ON CONFLICT (discord_id) DO UPDATE
+           SET username=EXCLUDED.username, telegram_id=EXCLUDED.telegram_id""",
+        (discord_id, discord_username, telegram_id)
     )
 
+    conn.commit()
+    conn.close()
+    return telegram_id, None
 
-@client.tree.command(name="help", description="Show all commands")
-async def slash_help(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "📋 **All Commands**\n\n"
-        "**Account**\n"
-        "`/start` `/register` `/chars` `/allchars`\n"
-        "`/linkaccount <code>` — link to Telegram account\n"
-        "`/linkstatus` — check link status\n\n"
-        "**Preset Teams**\n"
-        "`/createteam` `/teams` `/editteam` `/deleteteam`\n\n"
-        "**Scheduling**\n"
-        "`/createrun` — full guided flow\n"
-        "`/quickrun <boss> <difficulty>` — skip to members\n"
-        "`/cancelrun` `/resendrun` `/myruns` `/runs`\n\n"
-        "📅 All times SGT (UTC+8)",
-        ephemeral=True,
+
+def get_link_status(telegram_id):
+    """Check if a Telegram user has a linked Discord account."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM discord_users WHERE telegram_id=%s",
+        (telegram_id,)
     )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
 
 
-@client.tree.command(name="linkaccount", description="Link your Discord to your Telegram account")
-@app_commands.describe(code="The 8-character code from /linkdiscord on Telegram")
-async def slash_linkaccount(interaction: discord.Interaction, code: str):
-    auto_register(interaction.user)
-    telegram_id, err = db.consume_link_code(code, interaction.user.id, interaction.user.name)
-    if err:
-        await interaction.response.send_message(f"⚠️ {err}", ephemeral=True)
-        return
-    chars = db.get_characters_discord(interaction.user.id)
-    await interaction.response.send_message(
-        f"✅ **Accounts linked successfully!**\n\n"
-        f"Your Discord is now linked to your Telegram account.\n"
-        f"Characters shared: {len(chars)}\n\n"
-        f"You can now accept/decline runs on both platforms.",
-        ephemeral=True,
+def get_discord_link_status(discord_id):
+    """Check if a Discord user has a linked Telegram account."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT du.*, u.username as tg_username FROM discord_users du "
+        "JOIN users u ON u.telegram_id=du.telegram_id "
+        "WHERE du.discord_id=%s AND du.telegram_id IS NOT NULL",
+        (discord_id,)
     )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
 
 
-@client.tree.command(name="linkstatus", description="Check your account link status")
-async def slash_linkstatus(interaction: discord.Interaction):
-    auto_register(interaction.user)
-    linked = db.get_discord_link_status(interaction.user.id)
-    if linked:
-        await interaction.response.send_message(
-            f"✅ Linked to Telegram account @{linked['tg_username']}\n"
-            f"Characters are shared across both platforms.",
-            ephemeral=True,
-        )
-    else:
-        await interaction.response.send_message(
-            "❌ No Telegram account linked.\n\n"
-            "To link:\n"
-            "1. Open your Telegram bot\n"
-            "2. Send `/linkdiscord`\n"
-            "3. Copy the 8-character code\n"
-            "4. Use `/linkaccount <code>` here",
-            ephemeral=True,
-        )
-
-
-@client.tree.command(name="register", description="Register a MapleStory character")
-@app_commands.describe(ign="Your in-game name", cls="Your class", level="Your level")
-async def slash_register(interaction: discord.Interaction, ign: str, cls: str = None, level: int = None):
-    auto_register(interaction.user)
-    ok = db.add_character_discord(interaction.user.id, ign, cls, level)
-    if ok:
-        parts = [f"✅ Registered **{ign}**"]
-        if cls:
-            parts.append(f"Class: {cls}")
-        if level:
-            parts.append(f"Level: {level}")
-        await interaction.response.send_message(" | ".join(parts), ephemeral=True)
-    else:
-        await interaction.response.send_message(f"⚠️ IGN **{ign}** is already registered.", ephemeral=True)
-
-
-@client.tree.command(name="chars", description="List your registered characters")
-async def slash_chars(interaction: discord.Interaction):
-    auto_register(interaction.user)
-    chars = db.get_characters_discord(interaction.user.id)
-    if not chars:
-        await interaction.response.send_message("No characters yet. Use `/register`.", ephemeral=True)
-        return
-    lines = ["👤 **Your Characters**\n"]
-    for ch in chars:
-        line = f"• **{ch['ign']}**"
-        if ch["class"]:
-            line += f" — {ch['class']}"
-        if ch["level"]:
-            line += f" Lv.{ch['level']}"
-        lines.append(line)
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-
-@client.tree.command(name="allchars", description="List all registered guild characters")
-async def slash_allchars(interaction: discord.Interaction):
-    chars = db.get_all_characters_discord()
-    if not chars:
-        await interaction.response.send_message("No characters registered yet.", ephemeral=True)
-        return
-    lines = ["🌍 **All Guild Characters**\n"]
-    for ch in chars:
-        line = f"• **{ch['ign']}**"
-        if ch["class"]:
-            line += f" — {ch['class']}"
-        if ch["level"]:
-            line += f" Lv.{ch['level']}"
-        if ch.get("discord_id"):
-            line += f" (<@{ch['discord_id']}>)"
-        lines.append(line)
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-
-@client.tree.command(name="bosses", description="List all available bosses")
-async def slash_bosses(interaction: discord.Interaction):
-    bosses = db.get_all_bosses()
-    grouped = {}
-    for b in bosses:
-        grouped.setdefault(b["name"], []).append(b["difficulty"])
-    lines = ["⚔️ **Available Bosses**\n"]
-    for name, diffs in grouped.items():
-        icons = " ".join(f"{diff_icon(d)} {d}" for d in diffs)
-        lines.append(f"**{name}**\n  {icons}\n")
-    lines.append("🟢Easy 🔵Normal 🟠Hard 🔴Chaos ⚫Extreme")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-
-@client.tree.command(name="createrun", description="Create a boss run — guided flow")
-async def slash_createrun(interaction: discord.Interaction):
-    auto_register(interaction.user)
-    bosses = db.get_all_bosses()
-    grouped = {}
-    for b in bosses:
-        grouped.setdefault(b["name"], []).append(b["difficulty"])
-    recent = db.get_recent_bosses(3)
-    # Store the originating channel so the run posts there
-    run_data = {
-        "boss_map": grouped,
-        "creator_id": interaction.user.id,
-        "origin_channel_id": interaction.channel_id,
-        "guild_id": interaction.guild_id,
-    }
-    view = BossSelectView(grouped, interaction.user.id, recent)
-    view.run_data = run_data
-    await interaction.response.send_message(
-        f"{progress_bar(1)}\n\n⚔️ **Create a Boss Run**\n\nSelect a boss:\n⭐ = recently scheduled",
-        view=view,
-        ephemeral=True,
+def get_recent_bosses(limit=3):
+    """Get the most recently scheduled bosses for quick-pick."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT b.name, b.difficulty, COUNT(*) as run_count
+           FROM runs r
+           JOIN bosses b ON b.id=r.boss_id
+           WHERE r.created_at > NOW() - INTERVAL '30 days'
+           GROUP BY b.name, b.difficulty
+           ORDER BY MAX(r.created_at) DESC
+           LIMIT %s""",
+        (limit,)
     )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
 
 
-@client.tree.command(name="quickrun", description="Skip to member selection for a known boss")
-@app_commands.describe(boss="Boss name", difficulty="Difficulty")
-async def slash_quickrun(interaction: discord.Interaction, boss: str, difficulty: str):
-    auto_register(interaction.user)
-    boss_obj = db.find_boss(boss, difficulty)
-    if not boss_obj:
-        await interaction.response.send_message(
-            f"⚠️ **{boss} {difficulty}** not found. Use `/bosses` to see the list.",
-            ephemeral=True,
-        )
-        return
-    bosses = db.get_all_bosses()
-    grouped = {}
-    for b in bosses:
-        grouped.setdefault(b["name"], []).append(b["difficulty"])
-    run_data = {
-        "boss_map": grouped,
-        "boss_name": boss_obj["name"],
-        "difficulty": boss_obj["difficulty"],
-        "creator_id": interaction.user.id,
-        "origin_channel_id": interaction.channel_id,
-        "guild_id": interaction.guild_id,
-    }
-    view = MemberSelectView(run_data)
-    await interaction.response.send_message(
-        f"{progress_bar(3)}\n\n⚔️ **{boss_obj['name']} {boss_obj['difficulty']}**\n\n👥 Select party members:",
-        view=view,
-        ephemeral=True,
+def get_character_platform_info(char_ids):
+    """Get platform info (TG/DC) for a list of character IDs."""
+    if not char_ids:
+        return {}
+    conn = get_conn()
+    c = conn.cursor()
+    placeholders = ','.join(['%s'] * len(char_ids))
+    c.execute(
+        f"""SELECT ch.id, ch.telegram_id, ch.discord_id
+            FROM characters ch
+            WHERE ch.id IN ({placeholders})""",
+        char_ids
     )
+    rows = _rows(c, c.fetchall())
+    conn.close()
 
-
-@client.tree.command(name="cancelrun", description="Cancel a run")
-@app_commands.describe(run_id="Run ID")
-@app_commands.autocomplete(run_id=autocomplete_my_runs)
-async def slash_cancelrun(interaction: discord.Interaction, run_id: int):
-    auto_register(interaction.user)
-    run = db.get_run(run_id)
-    if not run:
-        await interaction.response.send_message(f"⚠️ Run #{run_id} not found.", ephemeral=True)
-        return
-
-    # Allow leader OR any member of the run to cancel
-    members = db.get_run_members_discord(run_id)
-    is_member = any(m.get("discord_id") == interaction.user.id for m in members)
-    is_leader = False
-    # Check if the Discord user is the leader (may be a placeholder telegram_id)
-    # We check by discord_id on the character matching leader's runs
-    leader_char = None
-    for m in members:
-        char = db.get_character_by_id(m["character_id"])
-        if char and char.get("discord_id") == interaction.user.id:
-            # Check if this char's telegram_id matches the run leader_id
-            if char["telegram_id"] == run["leader_id"] or (-char.get("discord_id", 0)) == run["leader_id"]:
-                is_leader = True
-                break
-
-    if not is_leader and not is_member:
-        await interaction.response.send_message("⚠️ Only run members can cancel a run.", ephemeral=True)
-        return
-
-    if run["status"] == "cancelled":
-        await interaction.response.send_message(f"⚠️ Run #{run_id} is already cancelled.", ephemeral=True)
-        return
-
-    db.cancel_run(run_id)
-    run = db.get_run(run_id)
-    embed = fmt_run_embed(run, members)
-    sgt = get_run_dt(run) + timedelta(hours=8)
-    cancel_text = (
-        f"❌ **Run #{run_id} cancelled by <@{interaction.user.id}>.**\n"
-        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-        f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}"
-    )
-    await _update_run_message(interaction.client, run, embed, view=None, content=cancel_text)
-
-    mentions = " ".join(f"<@{m['discord_id']}>" for m in members if m.get("discord_id"))
-    target_channel_id = run.get("discord_channel_id") or RUNS_CHANNEL_ID
-    await _post_to_channel(interaction.client, target_channel_id, f"{cancel_text}\n{mentions}")
-
-    tg_msg = (
-        f"❌ Run #{run_id} has been cancelled.\n\n"
-        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-        f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}"
-    )
-    await _notify_all_via_telegram(run_id, members, run, tg_msg)
-
-    await interaction.response.send_message(f"✅ Run #{run_id} has been cancelled.", ephemeral=True)
-
-
-@client.tree.command(name="resendrun", description="Resend invites to pending members")
-@app_commands.describe(run_id="Run ID")
-@app_commands.autocomplete(run_id=autocomplete_my_runs)
-async def slash_resendrun(interaction: discord.Interaction, run_id: int):
-    auto_register(interaction.user)
-    run = db.get_run(run_id)
-    if not run:
-        await interaction.response.send_message(f"⚠️ Run #{run_id} not found.", ephemeral=True)
-        return
-    if run["status"] == "cancelled":
-        await interaction.response.send_message("⚠️ This run has been cancelled.", ephemeral=True)
-        return
-
-    members = db.get_run_members_discord(run_id)
-    pending = [m for m in members if m["accepted"] == 0]
-    if not pending:
-        await interaction.response.send_message(
-            f"ℹ️ No pending members for Run #{run_id} — everyone has responded.", ephemeral=True
-        )
-        return
-
-    target_channel_id = run.get("discord_channel_id") or RUNS_CHANNEL_ID
-    embed = fmt_run_embed(run, members)
-    view = make_rsvp_view(run_id)
-    mentions = " ".join(f"<@{m['discord_id']}>" for m in pending if m.get("discord_id"))
-
-    await _post_to_channel(
-        interaction.client, target_channel_id,
-        f"📨 **Reminder for Run #{run_id}** — pending members: {mentions}\nPlease respond:",
-        embed=embed, view=view,
-    )
-
-    tg_notified, _ = await _notify_via_telegram(run_id, pending, run, {
-        "reminder_label": "8:00 AM SGT on the day of the run"
-    })
-
-    summary = f"✅ Resent invite to {len(pending)} pending member(s)."
-    if tg_notified:
-        summary += f"\n📱 Telegram notified: {', '.join(tg_notified)}"
-    await interaction.response.send_message(summary, ephemeral=True)
-
-
-@client.tree.command(name="myruns", description="Show your upcoming runs")
-async def slash_myruns(interaction: discord.Interaction):
-    auto_register(interaction.user)
-    runs = db.get_user_runs_discord(interaction.user.id)
-    if not runs:
-        await interaction.response.send_message("You have no upcoming runs.", ephemeral=True)
-        return
-    embeds = [fmt_run_embed(r, db.get_run_members_discord(r["id"])) for r in runs[:5]]
-    await interaction.response.send_message("📅 **Your Upcoming Runs**", embeds=embeds, ephemeral=True)
-
-
-@client.tree.command(name="runs", description="Show all upcoming guild runs")
-async def slash_runs(interaction: discord.Interaction):
-    runs = db.get_active_runs_discord()
-    if not runs:
-        await interaction.response.send_message("No upcoming runs.", ephemeral=True)
-        return
-    embeds = [fmt_run_embed(r, db.get_run_members_discord(r["id"])) for r in runs[:5]]
-    await interaction.response.send_message("📅 **All Upcoming Runs**", embeds=embeds, ephemeral=True)
-
-
-@client.tree.command(name="editrun", description="Edit a run's date/time or party")
-@app_commands.describe(run_id="Run ID")
-@app_commands.autocomplete(run_id=autocomplete_my_runs)
-async def slash_editrun(interaction: discord.Interaction, run_id: int):
-    auto_register(interaction.user)
-    run = db.get_run(run_id)
-    if not run:
-        await interaction.response.send_message(f"⚠️ Run #{run_id} not found.", ephemeral=True)
-        return
-    if run["status"] == "cancelled":
-        await interaction.response.send_message("⚠️ This run has been cancelled.", ephemeral=True)
-        return
-
-    members = db.get_run_members_discord(run_id)
-    is_member = any(m.get("discord_id") == interaction.user.id for m in members)
-    if not is_member:
-        await interaction.response.send_message("⚠️ Only run members can edit this run.", ephemeral=True)
-        return
-
-    sgt = get_run_dt(run) + timedelta(hours=8)
-    bosses = db.get_all_bosses()
-    grouped = {}
-    for b in bosses:
-        grouped.setdefault(b["name"], []).append(b["difficulty"])
-
-    run_data = {
-        "boss_map": grouped,
-        "boss_name": run["boss_name"],
-        "difficulty": run["difficulty"],
-        "creator_id": interaction.user.id,
-        "edit_run_id": run_id,
-        "origin_channel_id": run.get("discord_channel_id") or interaction.channel_id,
-        "guild_id": interaction.guild_id,
-        "selected_chars": [m["character_id"] for m in members],
-    }
-
-    await interaction.response.send_message(
-        f"✏️ **Edit Run #{run_id}**\n\n"
-        f"⚔️ {diff_icon(run['difficulty'])} {run['boss_name']} {run['difficulty']}\n"
-        f"📅 {sgt.strftime('%d/%m/%Y %H:%M SGT')}\n\n"
-        f"Select new members and/or date below:",
-        view=MemberSelectView(run_data),
-        ephemeral=True,
-    )
-
-
-# ── Team commands ─────────────────────────────────────────────────────────────
-
-@client.tree.command(name="createteam", description="Create a preset team")
-@app_commands.describe(name="Team name")
-async def slash_createteam(interaction: discord.Interaction, name: str):
-    auto_register(interaction.user)
-    if len(name) > 50:
-        await interaction.response.send_message("⚠️ Team name too long (max 50 chars).", ephemeral=True)
-        return
-
-    all_chars = db.get_all_characters_discord()
-    if not all_chars:
-        await interaction.response.send_message("No characters registered yet. Use `/register` first.", ephemeral=True)
-        return
-
-    platform_map = db.get_character_platform_info([ch["id"] for ch in all_chars])
-    options = [
-        discord.SelectOption(
-            label=f"{ch['ign']}" + (f" Lv.{ch['level']}" if ch["level"] else ""),
-            value=str(ch["id"]),
-            description=f"{ch['class'] or 'No class'} [{platform_map.get(ch['id'], '⚠️')}]",
-        )
-        for ch in all_chars[:25]
-    ]
-
-    select = discord.ui.Select(
-        placeholder="Select team members...",
-        min_values=1,
-        max_values=min(len(options), 25),
-        options=options,
-    )
-    view = discord.ui.View(timeout=300)
-    creator_id = interaction.user.id
-    team_name = name
-
-    async def on_select(inter: discord.Interaction):
-        if inter.user.id != creator_id:
-            await inter.response.send_message("⚠️ Only the team creator can use this.", ephemeral=True)
-            return
-        selected_ids = [int(v) for v in inter.data["values"]]
-        # Use placeholder telegram_id for teams created by Discord users
-        owner_tid = -(creator_id)
-        team_id, err = db.create_team(team_name, owner_tid, selected_ids)
-        if err:
-            await inter.response.send_message(f"⚠️ {err}", ephemeral=True)
+    result = {}
+    for r in rows:
+        has_tg = r["telegram_id"] and r["telegram_id"] > 0
+        has_dc = bool(r["discord_id"])
+        if has_tg and has_dc:
+            label = "TG+DC"
+        elif has_tg:
+            label = "TG"
+        elif has_dc:
+            label = "DC"
         else:
-            chars = [db.get_character_by_id(cid) for cid in selected_ids]
-            members = ", ".join(ch["ign"] for ch in chars if ch)
-            await inter.response.edit_message(
-                content=f"✅ Team **{team_name}** saved with {len(chars)} members: {members}",
-                view=None,
+            label = "⚠️"
+        result[r["id"]] = label
+    return result
+
+
+# ── Teams ─────────────────────────────────────────────────────────────────────
+
+def init_teams_table(conn=None):
+    close = conn is None
+    if conn is None:
+        conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS teams (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            created_by BIGINT NOT NULL REFERENCES users(telegram_id)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS team_members (
+            id SERIAL PRIMARY KEY,
+            team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+            UNIQUE(team_id, character_id)
+        )
+    """)
+    conn.commit()
+    if close:
+        conn.close()
+
+
+def create_team(name, created_by, char_ids):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute(
+            "INSERT INTO teams (name, created_by) VALUES (%s, %s) RETURNING id",
+            (name, created_by)
+        )
+        team_id = c.fetchone()[0]
+        for cid in char_ids:
+            c.execute(
+                "INSERT INTO team_members (team_id, character_id) VALUES (%s, %s)",
+                (team_id, cid)
             )
+        conn.commit()
+        return team_id, None
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return None, f"A team named '{name}' already exists."
+    finally:
+        conn.close()
 
-    select.callback = on_select
-    view.add_item(select)
-    await interaction.response.send_message(
-        f"👥 **Create Team: {name}**\n\nSelect members:", view=view, ephemeral=True
+
+def get_all_teams():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT t.*, u.username as creator_username
+           FROM teams t
+           JOIN users u ON u.telegram_id=t.created_by
+           ORDER BY t.name"""
     )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
 
 
-@client.tree.command(name="teams", description="List all preset teams")
-async def slash_teams(interaction: discord.Interaction):
-    teams = db.get_all_teams()
-    if not teams:
-        await interaction.response.send_message("No preset teams yet. Use `/createteam`.", ephemeral=True)
-        return
-    lines = ["👥 **Preset Teams**\n"]
-    for t in teams:
-        members = db.get_team_members(t["id"])
-        names = ", ".join(m["ign"] for m in members)
-        lines.append(f"• **{t['name']}** ({len(members)}): {names}")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+def get_team_by_name(name):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT t.*, u.username as creator_username
+           FROM teams t
+           JOIN users u ON u.telegram_id=t.created_by
+           WHERE LOWER(t.name)=LOWER(%s)""",
+        (name,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
 
 
-@client.tree.command(name="deleteteam", description="Delete a preset team")
-@app_commands.describe(name="Team name")
-async def slash_deleteteam(interaction: discord.Interaction, name: str):
-    auto_register(interaction.user)
-    team = db.get_team_by_name(name)
-    if not team:
-        await interaction.response.send_message(f"⚠️ Team **{name}** not found.", ephemeral=True)
-        return
-    db.delete_team(team["id"])
-    await interaction.response.send_message(f"🗑️ Team **{name}** deleted.", ephemeral=True)
+def get_team_by_id(team_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT t.*, u.username as creator_username
+           FROM teams t
+           JOIN users u ON u.telegram_id=t.created_by
+           WHERE t.id=%s""",
+        (team_id,)
+    )
+    result = _row(c, c.fetchone())
+    conn.close()
+    return result
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+def get_team_members(team_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """SELECT ch.*, u.username FROM team_members tm
+           JOIN characters ch ON ch.id=tm.character_id
+           JOIN users u ON u.telegram_id=ch.telegram_id
+           WHERE tm.team_id=%s ORDER BY ch.ign""",
+        (team_id,)
+    )
+    result = _rows(c, c.fetchall())
+    conn.close()
+    return result
 
-if __name__ == "__main__":
-    db.init_db()
-    client.run(DISCORD_TOKEN)
+
+def update_team(team_id, new_name, new_char_ids):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE teams SET name=%s WHERE id=%s", (new_name, team_id))
+        c.execute("DELETE FROM team_members WHERE team_id=%s", (team_id,))
+        for cid in new_char_ids:
+            c.execute(
+                "INSERT INTO team_members (team_id, character_id) VALUES (%s, %s)",
+                (team_id, cid)
+            )
+        conn.commit()
+        return True, None
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return False, f"A team named '{new_name}' already exists."
+    finally:
+        conn.close()
+
+
+def delete_team(team_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM teams WHERE id=%s", (team_id,))
+    deleted = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
